@@ -299,18 +299,21 @@ class WebMonitor:
         self.create_ban_statements()
 
     def push(self):
-        def execute_ban_on_minion(command):
-            self.log('Pushing new rule: ' + command)
-            r = self.exec_on_minion(command)
-            if r:
-                print(r)
+        def execute_ban_on_minion(address):
+            if address and address != "":
+                print('Pushing new rule: ' + address, end='')
+                command = f'sudo /sbin/iptables -A INPUT --source {address} -j DROP'
+                r = self.exec_on_minion(command, bash_syntax=True)
+                if r:
+                    if type(r) == list and len(r) > 2 and not any('error' in m for m in r):
+                        print(' --> OK')
 
         for impact in self.dangerous_impacts:
             source = impact.source_address
             if any(source == i.source_address for i in self.pushed_impacts):
                 continue
             else:
-                execute_ban_on_minion(command=f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP')
+                execute_ban_on_minion(address=f'{impact.source_address}')
                 self.pushed_impacts.append(impact)
 
 
