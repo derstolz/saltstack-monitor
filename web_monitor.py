@@ -23,8 +23,13 @@ def get_arguments():
                              'Without this options, Web Monitor will simply print the current status and exit.')
     parser.add_argument('-b', '--banned', dest='banned',
                         help='A file contains iptables block statements.'
-                             'This file should exist and be writable for the script.'
+                             'This file should exist and be writable for the script. '
                              'If not provided, then file would be created and all statements will be written to it.')
+    parser.add_argument('-p', '--push', action='store_true',
+                        help='Push generated block statements to the minion(s). '
+                             'They will apply received statements as soon as they arrived.')
+    parser.add_argument('-v', '--verbose', action='store_true',
+                        help='Be verbose. Print explain information about the most dangerous impacts')
     options = parser.parse_args()
     if not options.saltstack and not options.config:
         parser.error('Use should provide something to do; '
@@ -35,13 +40,19 @@ def get_arguments():
 
 
 class Impact:
-    def __init__(self, source, hits, events=None, is_dangerous=False, is_pushed=False, is_known=False):
+    def __init__(self, source, hits, is_dangerous=False, is_pushed=False):
         self.source_address = source
         self.hits = hits
-        self.events = events
         self.is_dangerous = is_dangerous
         self.is_pushed = is_pushed
-        self.is_known = is_known
+        self.requests = []
+
+    def explain(self):
+        def print_requests(impact):
+            for req in impact.requests:
+                print(f'\n\t{req}; ', end='')
+
+        print(f'\n\n{self.source_address} --> {print_requests(self)}')
 
     @staticmethod
     def calculate_impact_statistic(events):
@@ -54,20 +65,13 @@ class Impact:
         impacts = []
         for source, hits in addresses.items():
             is_dangerous = hits > 100
-            impact_related_events = []
             impact = Impact(source, hits, is_dangerous)
-            for eve in events:
-                if impact.source_address == eve.source:
-                    impact_related_events.append(eve)
-            if len(impact_related_events) > 0:
-                impact.events = impact_related_events
             impacts.append(impact)
+        for i in impacts:
+            for eve in events:
+                if eve.source == i.source_address:
+                    i.requests.append(eve.request)
         return impacts
-
-    def explain(self):
-        message = f'{self.source_address} --> {[print(i.request, end="") for i in self.events]}'
-        print(message)
-        return message
 
 
 class ThreatLevel(Enum):
@@ -100,7 +104,7 @@ class WebMonitor:
     """
 
     def __init__(self, minion_id=None, config_file=None, default_sleep_timer=None, download_data_since=None,
-                 banned_file=None):
+                 banned_file=None, push_banned_list=False, be_verbose=False):
         self.events = []
         if not minion_id and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
@@ -112,6 +116,8 @@ class WebMonitor:
             self.SLEEP_TIMER_IN_SEC = int(config['Monitor']['PollingIntervalInSeconds'])
             self.download_data_since = config['Monitor']['DownloadDataForLast']
             self.banned_file = config['Monitor']['BannedFile']
+            self.should_push_banned_list = config['Monitor']['ShouldPushBannedList']
+            self.verbose = config['Monitor']['Verbosity']
         else:
             self.minion_id = minion_id
             if not default_sleep_timer:
@@ -127,6 +133,7 @@ class WebMonitor:
                 self.banned_file = banned_file
             else:
                 self.banned_file = 'banned.txt'
+            self.verbose = be_verbose
 
         self.is_alive = False
         self.threat_level = ThreatLevel.UNKNOWN
@@ -134,6 +141,7 @@ class WebMonitor:
         self.dangerous_impacts = []
         self.pushed_impacts = []
         self.banned_explained_file = 'banned_explained.txt'
+        self.should_push_banned_list = push_banned_list
 
     """
         Provide a command to execute on the remote system
@@ -208,8 +216,8 @@ class WebMonitor:
         self.analyze_threats()
         self.report()
 
-        for impact in self.dangerous_impacts:
-            impact.explain()
+        if self.should_push_banned_list:
+            self.push()
 
     def ping(self):
         error_message = 'The salt master could not be contacted.'
@@ -264,9 +272,9 @@ class WebMonitor:
                     unsaved_count += 1
             write_fd.close()
             read_fd.close()
-            if saved_count > 0:
+            if saved_count > 0 and not self.should_push_banned_list:
                 self.log(
-                    f'{saved_count} new blocking rules. Use --push with --banned {self.banned_file} '
+                    f'{saved_count} new blocking rule(s) has been added. Use --push '
                     f'to send them to the impacted server.')
 
 
@@ -278,26 +286,48 @@ class WebMonitor:
             is_alive_message = 'Host is up'
         else:
             is_alive_message = 'Host is down'
-        self.log(f'\n\tStatus: {is_alive_message};'
-                 f'\n\tThreat level: {self.threat_level};'
+        self.log(f'\n\tStatus: {is_alive_message}'
+                 f'\n\tThreat level: {self.threat_level}'
                  f'\n\tTotal suspicious events received for last {self.download_data_since}: {len(self.events)}'
-                 f'\n\tTotal impacts (unique IP addresses): {len(self.impacts)}'
-                 f'\n\tDangerous impacts (unique IP addresses with a lot of hits): {len(self.dangerous_impacts)} '
-                 f'({sum(di.hits for di in self.dangerous_impacts)} hits)')
+                 f'\n\n\tNon-aggressive impacts: {len(self.impacts) - len(self.dangerous_impacts)}'
+                 f'\n\tAggressive impacts: {len(self.dangerous_impacts)} '
+                 f'({sum(di.hits for di in self.dangerous_impacts)} hits)'
+                 f'\n\tTotal impacts: {len(self.impacts)}')
+        if self.verbose:
+            for impact in self.dangerous_impacts:
+                impact.explain()
         self.create_ban_statements()
+
+    def push(self):
+        def execute_ban_on_minion(command):
+            self.log('Pushing new rule: ' + command)
+            r = self.exec_on_minion(command)
+            if r:
+                print(r)
+
+        for impact in self.dangerous_impacts:
+            source = impact.source_address
+            if any(source == i.source_address for i in self.pushed_impacts):
+                continue
+            else:
+                execute_ban_on_minion(command=f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP')
+                self.pushed_impacts.append(impact)
 
 
 options = get_arguments()
 if options.config:
     web_monitor = WebMonitor(config_file=options.config,
                              default_sleep_timer=options.sleep_timer,
-                             banned_file=options.banned)
+                             banned_file=options.banned,
+                             be_verbose=options.verbose)
     web_monitor.daemon()
 elif options.saltstack:
     web_monitor = WebMonitor(options.minion_id,
                              default_sleep_timer=options.sleep_timer,
                              download_data_since=options.last,
-                             banned_file=options.banned)
+                             banned_file=options.banned,
+                             push_banned_list=options.push,
+                             be_verbose=options.verbose)
     if options.daemon:
         web_monitor.daemon()
     else:
