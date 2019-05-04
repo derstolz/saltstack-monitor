@@ -11,25 +11,28 @@ def get_arguments():
     parser.add_argument('-s', '--saltstack', action='store_true',
                         help='Use Saltstack as a transport for your commands to the watched minions.')
     parser.add_argument('-m', '--minion-id', dest='minion_id',
-                        help='Provide a comma separated list of the minion ids which you want to monitor and push the rules to')
+                        help='Provide a string or a comma separated list of the minion id(s) '
+                             'which you want to monitor and push the rules to')
     parser.add_argument('-st', '--sleep-timer', dest='sleep_timer',
-                        help='Provide a sleep timer for the web monitor, in seconds')
+                        help='Optional. Provide a sleep timer for the web monitor, in seconds. Default is 60s.')
     parser.add_argument('-l', '--last', dest='last',
-                        help='Provide a time delta in "10d 8h" format to receive data from the remote machine.')
+                        help='Optional. Provide a time delta in "10d 8h" format '
+                             'to receive data from the remote machine. Default is 20d')
     parser.add_argument('-d', '--daemon', action='store_true',
-                        help='Run Web Monitor as a daemon. In daemon mode, '
+                        help='Optional. Run Web Monitor as a daemon. In daemon mode, '
                              'Web Monitor can periodically interact with your minions, '
                              'receive their status and then print the current status. '
                              'Without this options, Web Monitor will simply print the current status and exit.')
     parser.add_argument('-b', '--banned', dest='banned',
-                        help='A file contains iptables block statements.'
+                        help='Optional. A file contains iptables block statement(s). '
                              'This file should exist and be writable for the script. '
                              'If not provided, then file would be created and all statements will be written to it.')
     parser.add_argument('-p', '--push', action='store_true',
-                        help='Push generated block statements to the minion(s). '
-                             'They will apply received statements as soon as they arrived.')
+                        help='Optional. Push generated block statements to the minion(s). '
+                             'They will be applied received statements as soon as they arrived. Default is false.')
     parser.add_argument('-v', '--verbose', action='store_true',
-                        help='Be verbose. Print the explain information about the most dangerous impacts')
+                        help='Optional. Be verbose. Print the explain information about the most dangerous impacts. '
+                             'Default is false')
     options = parser.parse_args()
     if not options.saltstack and not options.config:
         parser.error('Use should provide something to do; '
@@ -103,8 +106,8 @@ class Impact:
     Host threat level.
     CRITICAL means that your server had a heavy load in his last time.
     RED and YELLOW indicates that server has a lot of suspicious traffic but still not enough to mark is as CRITICAL.
-    GREEN means that host is reachable and minion is responding with a low number of events.
-    UNKNOWN means that your host is unreachable or your minion can not report back.
+    GREEN means that host is reachable and responding with a low number of events.
+    UNKNOWN means that your host is unreachable or your minion can not report back because of any reason.
 """
 
 
@@ -188,6 +191,7 @@ class WebMonitor:
             else:
                 self.banned_file = 'banned.txt'
             self.verbose = be_verbose
+            self.remote_logs_file = '/var/log/apache2/access.log'
 
         self.is_alive = False
         self.threat_level = ThreatLevel.UNKNOWN
@@ -257,6 +261,8 @@ class WebMonitor:
         def str_to_event_object(e):
             import ast
             dict = ast.literal_eval(e)
+            if len(dict.keys()) > 0:
+                self.threat_level = ThreatLevel.GREEN
             if dict and dict['is_suspicious']:
                 event = Event(
                     dict['source'],
@@ -329,16 +335,15 @@ class WebMonitor:
             def get_last_events():
                 self.events.clear()
                 if self.download_data_since and len(self.download_data_since) < 12:
-                    command = f'cd /root/web_monitor && python3.7 web_monitor_minion.py --last "{self.download_data_since}"'
-                    return self.exec_on_minion(command, bash_syntax=True)[4:-1]
+                    command = f'web-monitor-minion --path {self.remote_logs_file} --last "{self.download_data_since}"'
+                    minion_response = self.exec_on_minion(command, bash_syntax=True)
+                    return list(minion_response)
 
             try:
                 r = get_last_events()
             except:
                 return
             if r and len(r) > 3:
-                if self.threat_level == ThreatLevel.UNKNOWN:
-                    self.threat_level = ThreatLevel.GREEN
                 events = r[3:-1]
                 self.parse_events(events)
             self.identify_threat_level()
@@ -349,7 +354,6 @@ class WebMonitor:
 
     def analyze_threats(self):
         if not self.events or len(self.events) == 0:
-            print('No events to process, returning')
             return
         self.impacts.clear()
         self.dangerous_impacts.clear()
@@ -386,8 +390,6 @@ class WebMonitor:
                 self.log(
                     f'{saved_count} new blocking rule(s) has been added. Use --push '
                     f'to send them to the impacted server.')
-        else:
-            self.log('No dangerous impacts, nothing to ban')
 
     """
         Print a report about minion status, his statistic and addresses pushed to be banned.
@@ -398,15 +400,19 @@ class WebMonitor:
             is_alive_message = 'Host is up'
         else:
             is_alive_message = 'Host is down'
-        self.log(f'\n\tStatus: {is_alive_message}'
-                 f'\n\tThreat level: {self.threat_level}'
-                 f'\n\tTotal suspicious events received for last {self.download_data_since}: {len(self.events)}'
-                 f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}'
-                 f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} '
-                 f'({sum(di.hits for di in self.dangerous_impacts)} hits)'
-                 f'\n\tTotal IP addresses: {len(self.impacts)}')
+
+        report_message = f'\n\tStatus: {is_alive_message}'\
+                 f'\n\tThreat level: {self.threat_level.name}'
+        if self.threat_level != ThreatLevel.UNKNOWN and len(self.events) > 0:
+            report_message+=f'\n\tTotal suspicious events received for last {self.download_data_since}: {len(self.events)}'\
+                 f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}'\
+                 f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} '\
+                 f'({sum(di.hits for di in self.dangerous_impacts)} hits)'\
+                 f'\n\tTotal IP addresses: {len(self.impacts)}'
         if len(self.pushed_impacts) > 0:
-            print('\n\tPushed IP addresses to block: ' + str(len(self.pushed_impacts)))
+            report_message += '\n\tPushed IP addresses to block: ' + str(len(self.pushed_impacts))
+
+        self.log(report_message)
         if self.verbose:
             for impact in self.dangerous_impacts:
                 impact.explain()
@@ -462,13 +468,14 @@ elif options.saltstack:
                                              be_verbose=options.verbose)
                     web_monitor.work()
         else:
-            web_monitor = WebMonitor(minions,
-                                     default_sleep_timer=options.sleep_timer,
-                                     download_data_since=options.last,
-                                     banned_file=options.banned,
-                                     push_banned_list=options.push,
-                                     be_verbose=options.verbose)
-            web_monitor.work()
+            for m in minions.split(','):
+                web_monitor = WebMonitor(m,
+                                         default_sleep_timer=options.sleep_timer,
+                                         download_data_since=options.last,
+                                         banned_file=options.banned,
+                                         push_banned_list=options.push,
+                                         be_verbose=options.verbose)
+                web_monitor.work()
     else:
         web_monitor = WebMonitor(minions,
                                  default_sleep_timer=options.sleep_timer,
