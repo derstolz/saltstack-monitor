@@ -11,7 +11,7 @@ def get_arguments():
     parser.add_argument('-s', '--saltstack', action='store_true',
                         help='Use Saltstack as a transport for your commands to the watched minions.')
     parser.add_argument('-m', '--minion-id', dest='minion_id',
-                        help='Provide a minion_id from the saltstack to receive and analyze data from')
+                        help='Provide a comma separated list of the minion ids which you want to monitor and push the rules to')
     parser.add_argument('-st', '--sleep-timer', dest='sleep_timer',
                         help='Provide a sleep timer for the web monitor, in seconds')
     parser.add_argument('-l', '--last', dest='last',
@@ -29,7 +29,7 @@ def get_arguments():
                         help='Push generated block statements to the minion(s). '
                              'They will apply received statements as soon as they arrived.')
     parser.add_argument('-v', '--verbose', action='store_true',
-                        help='Be verbose. Print explain information about the most dangerous impacts')
+                        help='Be verbose. Print the explain information about the most dangerous impacts')
     options = parser.parse_args()
     if not options.saltstack and not options.config:
         parser.error('Use should provide something to do; '
@@ -39,7 +39,21 @@ def get_arguments():
     return options
 
 
+"""
+    Impact is an entity represents an activity record. 
+    It contains a source, number of hits and all requests made my this person.
+"""
+
+
 class Impact:
+    """
+        @:param source - source IP address of the possible intruder.
+        @:param hits - a number of requests made by the possible intruder
+        @:param is_dangerous - a flag defines that this intruder can be dangerous and he has a lot of hits
+        @:param is_pushed -
+               a flag indicates that this impact was reported back to the minion and he should be already blocked.
+    """
+
     def __init__(self, source, hits, is_dangerous=False, is_pushed=False):
         self.source_address = source
         self.hits = hits
@@ -47,12 +61,23 @@ class Impact:
         self.is_pushed = is_pushed
         self.requests = []
 
+    """
+        Print explaining information about this impact (source address, requests and hits).
+    """
+
     def explain(self):
         def print_requests(impact):
             for req in impact.requests:
                 print(f'\n\t{req}; ', end='')
+            print()
 
-        print(f'\n\n{self.source_address} --> {print_requests(self)}')
+        if self.requests and len(self.requests) > 0:
+            print(f'\n\n{self.source_address} --> ')
+            print_requests(self)
+
+    """
+        Convert events into the impacts. Define dangerous impacts. Link given events to the created impacts.
+    """
 
     @staticmethod
     def calculate_impact_statistic(events):
@@ -74,12 +99,27 @@ class Impact:
         return impacts
 
 
+"""
+    Host threat level.
+    CRITICAL means that your server had a heavy load in his last time.
+    RED and YELLOW indicates that server has a lot of suspicious traffic but still not enough to mark is as CRITICAL.
+    GREEN means that host is reachable and minion is responding with a low number of events.
+    UNKNOWN means that your host is unreachable or your minion can not report back.
+"""
+
+
 class ThreatLevel(Enum):
     CRITICAL = 0
     RED = 1
     YELLOW = 2
     GREEN = 3
     UNKNOWN = 4
+
+
+"""
+    Event represent a converted message which was marked as a suspicious one.
+    Each event can be false-positive, so you have to check them properly.
+"""
 
 
 class Event:
@@ -94,13 +134,27 @@ class Event:
 
 
 """
-   Use this class to monitor your remote instance via provided transport mechanism
+   WebMonitor is responsible for the minions web-servers logs monitoring. 
+   It will periodically interact with his minions to check their logs and perform threat analyses.
+   Web-minion will send a list of json strings which is representing the 'Event' entity described above
+   then analyze them and generate ban statements. Those statements could be pushed to the minion via saltstack.
 """
 
 
 class WebMonitor:
     """
-        Provide a minion_id to communicate via saltstack
+        @:param minion_id - a saltstack minion id to communicate with.
+        @:param config_file - a configuration file which is used instead of the cli options.
+        web-monitor.conf is a configuration example.
+
+        @:param default_sleep_timer - how long monitor should wait before he should recheck the minions status
+        @:param download_data_since - last period of time to pull information about. eg: 10d / 100d / 60m
+        @:param banned_file - a file name to store created ban statements
+        @:param push_banned_list - a boolean indicates that WebMonitor should push created ban statements to the minion.
+        Default is false.
+        Without this options, WebMonitor will simply analyze events and warn you about the most aggressive attempts.
+
+        @:param be_verbose - increase verbosity, print detailed information about the most aggressive impacts
     """
 
     def __init__(self, minion_id=None, config_file=None, default_sleep_timer=None, download_data_since=None,
@@ -144,11 +198,19 @@ class WebMonitor:
         self.should_push_banned_list = push_banned_list
 
     """
-        Provide a command to execute on the remote system
+        Execute a command on the remote minion.
+        Command will be executed on the minion with id stored in the self.minion_id
+        
+        @:param bash_syntax - define that provided command is pure bash command e.g.: pwd && ls -l 
+                              that should be forwarded to the minion 'as is'
+        @:param salt_syntax - define that provided command is salt statement e.g.: salt prod1 cmd.run 'uname -a'
+                              and should be forwarded to the minion.
     """
 
     def exec_on_minion(self, command, bash_syntax=False, salt_syntax=False):
         import subprocess
+        if not bash_syntax and not salt_syntax:
+            raise Exception("No syntax scheme provided, you should choose bash_syntax or salt_syntax")
 
         try:
             exec_result = None
@@ -164,11 +226,21 @@ class WebMonitor:
                 except:
                     self.log('Error on parsing response from the minion')
         except Exception as e:
-            self.log('Cannot execute command. Error was: ' + str(e))
+            self.log('Cannot execute command: ' + str(e))
+
+    """
+        Save a log message with a minion id and current time prefix
+        @:param msg - message to log
+    """
 
     def log(self, msg):
         import datetime
         print(f'[{self.minion_id}]:[{datetime.datetime.now()}] - {msg}')
+
+    """
+        Run web-monitor in daemon mode. 
+        This daemon will periodically interact with his minions with a provided sleep interval.
+    """
 
     def daemon(self):
         import time
@@ -176,6 +248,10 @@ class WebMonitor:
             self.work()
             self.log(f'Sleeping for the {self.SLEEP_TIMER_IN_SEC / 60} min(s)')
             time.sleep(int(self.SLEEP_TIMER_IN_SEC))
+
+    """
+        Convert incoming events from the minion into the Event object and store them in web-monitor memory.
+    """
 
     def parse_events(self, events):
         def str_to_event_object(e):
@@ -197,7 +273,13 @@ class WebMonitor:
             if eve:
                 self.events.append(eve)
 
-    def identify_thread_level(self):
+    """
+        Identify current minion status. 
+        Monitor will increase the threat level if he will receive a lot of events from the minion
+        CRITICAL level for less then 1h would means that your server is under the siege
+    """
+
+    def identify_threat_level(self):
         if self.events:
             number_of_events = len(self.events)
 
@@ -210,6 +292,10 @@ class WebMonitor:
             elif number_of_events > 1000:
                 self.threat_level = ThreatLevel.CRITICAL
 
+    """
+        Run the full lifecycle. Each step of this cycle is described bellow.
+    """
+
     def work(self):
         self.ping()
         self.status()
@@ -219,27 +305,47 @@ class WebMonitor:
         if self.should_push_banned_list:
             self.push()
 
+    """
+        Test that minion is reachable 
+    """
+
     def ping(self):
         error_message = 'The salt master could not be contacted.'
         self.log('Receiving minion(s) status...')
-        minion_heartbeat = self.exec_on_minion(['salt', self.minion_id, 'test.ping'], salt_syntax=True)
-        if minion_heartbeat and error_message not in str(minion_heartbeat):
-            self.is_alive = True
+        try:
+            minion_heartbeat = self.exec_on_minion(['salt', self.minion_id, 'test.ping'], salt_syntax=True)
+            if minion_heartbeat and error_message not in str(minion_heartbeat):
+                self.is_alive = True
+        except:
+            self.is_alive = False
+            return
+
+    """
+        Receive input from the minion, parse them into events and identify current threat status.
+    """
 
     def status(self):
         if self.is_alive:
             def get_last_events():
                 self.events.clear()
-                command = f'cd /root/web_monitor && python3.7 web_monitor_minion.py --last "{self.download_data_since}"'
-                return self.exec_on_minion(command, bash_syntax=True)[4:-1]
+                if self.download_data_since and len(self.download_data_since) < 12:
+                    command = f'cd /root/web_monitor && python3.7 web_monitor_minion.py --last "{self.download_data_since}"'
+                    return self.exec_on_minion(command, bash_syntax=True)[4:-1]
 
-            r = get_last_events()
+            try:
+                r = get_last_events()
+            except:
+                return
             if r and len(r) > 3:
                 if self.threat_level == ThreatLevel.UNKNOWN:
                     self.threat_level = ThreatLevel.GREEN
                 events = r[3:-1]
                 self.parse_events(events)
-            self.identify_thread_level()
+            self.identify_threat_level()
+
+    """
+        Analyze received input. Define the impacts. Aggregate the most active addresses.
+    """
 
     def analyze_threats(self):
         if not self.events or len(self.events) == 0:
@@ -252,6 +358,10 @@ class WebMonitor:
         for i in self.impacts:
             if i.is_dangerous:
                 self.dangerous_impacts.append(i)
+
+    """
+        Parse created impacts, make a list with ban statements and store them into file.
+    """
 
     def create_ban_statements(self):
         if len(self.dangerous_impacts) > 0:
@@ -276,10 +386,12 @@ class WebMonitor:
                 self.log(
                     f'{saved_count} new blocking rule(s) has been added. Use --push '
                     f'to send them to the impacted server.')
-
-
         else:
             self.log('No dangerous impacts, nothing to ban')
+
+    """
+        Print a report about minion status, his statistic and addresses pushed to be banned.
+    """
 
     def report(self):
         if self.is_alive:
@@ -289,20 +401,32 @@ class WebMonitor:
         self.log(f'\n\tStatus: {is_alive_message}'
                  f'\n\tThreat level: {self.threat_level}'
                  f'\n\tTotal suspicious events received for last {self.download_data_since}: {len(self.events)}'
-                 f'\n\n\tNon-aggressive impacts: {len(self.impacts) - len(self.dangerous_impacts)}'
-                 f'\n\tAggressive impacts: {len(self.dangerous_impacts)} '
+                 f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}'
+                 f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} '
                  f'({sum(di.hits for di in self.dangerous_impacts)} hits)'
-                 f'\n\tTotal impacts: {len(self.impacts)}')
+                 f'\n\tTotal IP addresses: {len(self.impacts)}')
+        if len(self.pushed_impacts) > 0:
+            print('\n\tPushed IP addresses to block: ' + str(len(self.pushed_impacts)))
         if self.verbose:
             for impact in self.dangerous_impacts:
                 impact.explain()
         self.create_ban_statements()
 
+    """
+        Push created ban statements to the minion. 
+        This action (if succeed) will block the traffic between pushed address and the remote minion.
+        After statement was pushed, address will be stored in memory and will not be pushed anymore.
+    """
+
     def push(self):
         def execute_ban_on_minion(address):
             if address and address != "":
                 print('Pushing new rule: ' + address, end='')
-                command = f'sudo /sbin/iptables -A INPUT --source {address} -j DROP'
+                command = \
+                    f'sudo /sbin/iptables ' \
+                        f'-A INPUT ' \
+                        f'--source {address} ' \
+                        f'-j DROP'
                 r = self.exec_on_minion(command, bash_syntax=True)
                 if r:
                     if type(r) == list and len(r) > 2 and not any('error' in m for m in r):
@@ -325,13 +449,34 @@ if options.config:
                              be_verbose=options.verbose)
     web_monitor.daemon()
 elif options.saltstack:
-    web_monitor = WebMonitor(options.minion_id,
-                             default_sleep_timer=options.sleep_timer,
-                             download_data_since=options.last,
-                             banned_file=options.banned,
-                             push_banned_list=options.push,
-                             be_verbose=options.verbose)
-    if options.daemon:
-        web_monitor.daemon()
+    minions = options.minion_id
+    if ',' in minions:
+        if options.daemon:
+            while True:
+                for m in minions.split(','):
+                    web_monitor = WebMonitor(m,
+                                             default_sleep_timer=options.sleep_timer,
+                                             download_data_since=options.last,
+                                             banned_file=options.banned,
+                                             push_banned_list=options.push,
+                                             be_verbose=options.verbose)
+                    web_monitor.work()
+        else:
+            web_monitor = WebMonitor(minions,
+                                     default_sleep_timer=options.sleep_timer,
+                                     download_data_since=options.last,
+                                     banned_file=options.banned,
+                                     push_banned_list=options.push,
+                                     be_verbose=options.verbose)
+            web_monitor.work()
     else:
-        web_monitor.work()
+        web_monitor = WebMonitor(minions,
+                                 default_sleep_timer=options.sleep_timer,
+                                 download_data_since=options.last,
+                                 banned_file=options.banned,
+                                 push_banned_list=options.push,
+                                 be_verbose=options.verbose)
+        if options.daemon:
+            web_monitor.daemon()
+        else:
+            web_monitor.work()
