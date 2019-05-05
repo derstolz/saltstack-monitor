@@ -6,7 +6,7 @@ Saltstack WebMonitor is used for the three purposes:
 <br/>2. Receive this information, analyze it and print a report about suspicious traffic received by the web server.
 <br/>3. According to the printed report, push generated iptables drop statements to the minion.
 
-<b><h2>Installation<h2/></b>
+<b><h2>Installation</h2></b>
  
  
  <br/> On the <b>minion</b> side:
