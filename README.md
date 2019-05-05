@@ -24,12 +24,13 @@ Saltstack WebMonitor is used for the three purposes:
 <br>On the <b>minion</b> side:
 <br/>(Optional) make sure that you have a link '<i>web-monitor-minion</i>' to web_monitor_minion.py script in the /usr/bin directory, so master would be able to call your minion. Master will ask for a command e.g.: <i>'web-monitor-minion --path /var/log/nginx/access.log --last 10d</i>. In general, the saltstack-minion-setup.sh should do it for you.
 <br/><br/>On the <b>master</b> side:
-<br/># python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --daemon
+<br/># <b>python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --daemon</b>
 <br/> to run the master in daemon monitor mode: interact with your minion (or minions - you can provide a comma (,) separated list of all your minions that your want to monitor). Master will print statistics about events received from the minion and suggest you to block the most aggressive addresses.
-<br/><br/>#python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --daemon --push
+<br/><br/>#<b>python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --daemon --push</b>
 <br/> to run the master in daemon monitor mode and push iptables rules to the minion. e.g. of created rules: 'iptables -A INPUT --source 123.213.123.213 -j DROP'
 <br/><i>123.213.123.213 here is an IP addresses that was marked as a dangerous one (more than 100 hits)</i>
 
 You can (and probably should) review the generated statements before pushing them, you also can receive a geolocation lookup about collected threats. You can run the WebMonitor in daemon mode to keep watching your WebMonitorMinion(s).
+<br/><br/> #
 
 <br/> use ./web_monitor.py --help to get more info how to run it.
