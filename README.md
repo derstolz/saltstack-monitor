@@ -5,7 +5,7 @@ Saltstack WebMonitor is used for the three purposes:
 <br/>1. Communicate with a minion and ask him to collect information about web server's logs.
 <br/>2. Receive this information, analyze it and print a report about suspicious traffic received by the web server.
 <br/>3. According to the printed report, push generated iptables drop statements to the minion.
-
+<br/>Please refer to the project wiki to get more info.
 <b><h2>Installation:</h2></b>
  
  
@@ -36,6 +36,4 @@ You can (and probably should) review the generated statements before pushing the
 <br/><br/> #<b>python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --geolookup</b>
 <br/> to perform a geolocation lookup to get overview about the source of the malicious activity.
 <br/><br/> use ./web_monitor.py --help to see more options.
-
-<br/>Please refer to the project wiki to get information about master and minion(s) communication.
 
