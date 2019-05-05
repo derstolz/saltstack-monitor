@@ -2,7 +2,7 @@
 This project is based on the saltstack automation framework. See https://www.saltstack.com/ for more info.
 
 Saltstack WebMonitor is used for the three purposes:
-<br/>1. Communicate with a WebMonitorMinion and ask him to collect information about web server's logs.
+<br/>1. Communicate with a minion and ask him to collect information about web server's logs.
 <br/>2. Receive this information, analyze it and print a report about suspicious traffic received by the web server.
 <br/>3. According to the printed report, push generated iptables drop statements to the minion.
 
@@ -12,6 +12,7 @@ Saltstack WebMonitor is used for the three purposes:
  <br/> On the <b>minion</b> side:
   <br/>1. install saltstack: run saltstack-minion-setup.sh from the project repo
   <br/>2. add a master's IP address to the salt-minion configuration file: /etc/salt/minion
+  <br/>3. (Optional) make sure that you have a link '<i>web-monitor-minion</i>' to web_monitor_minion.py script in the /usr/bin directory, so master would be able to call your minion. Master will ask for a command <i>'web-monitor-minion --path /var/log/nginx/access.log --last 10d</i>. In general, the saltstack-minion-setup.sh should do it for you.
 <br/><br/> On the <b>master</b> side:
   <br/> 1. install saltstack: run saltstack-master-setup.sh from the project repo
   <br/> 2. minion will try to communicate with master since he is online. you should accept his key and authorize him.
