@@ -23,6 +23,8 @@ Saltstack WebMonitor is used for the three purposes:
 <b><h2>Running:</h2></b>
 <br>On the <b>minion</b> side:
 <br/>(Optional) make sure that you have a link '<i>web-monitor-minion</i>' to web_monitor_minion.py script in the /usr/bin directory, so master would be able to call your minion. Master will ask for a command e.g.: <i>'web-monitor-minion --path /var/log/nginx/access.log --last 10d</i>. In general, the saltstack-minion-setup.sh should do it for you.
+<br>On the <b>master</b> side:
+<br>blah
 
 
 You can (and probably should) review the generated statements before pushing them, you also can receive a geolocation lookup about collected threats. You can run the WebMonitor in daemon mode to keep watching your WebMonitorMinion(s).
