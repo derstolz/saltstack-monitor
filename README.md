@@ -30,7 +30,10 @@ Saltstack WebMonitor is used for the three purposes:
 <br/> to run the master in daemon monitor mode and push iptables rules to the minion. e.g. of created rules: 'iptables -A INPUT --source 123.213.123.213 -j DROP'
 <br/><i>123.213.123.213 here is an IP addresses that was marked as a dangerous one (more than 100 hits)</i>
 
-You can (and probably should) review the generated statements before pushing them, you also can receive a geolocation lookup about collected threats. You can run the WebMonitor in daemon mode to keep watching your WebMonitorMinion(s).
-<br/><br/> #
+You can (and probably should) review the generated statements before pushing them, you also can receive a geolocation lookup about collected threats. You can run the web-monitor-master in daemon mode to keep watching your web-monitor-minion(s).
+<br/><br/> #<b>python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --verbose</b>
+<br/> to print explaining information about incoming events - and tell why some events was marked as dangerous and suggested to be blocked. 
 
+<br/><br/> #<b>python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --geolookup</b>
+<br/> to perform a geolocation lookup to get overview about the source of the malicious activity.
 <br/> use ./web_monitor.py --help to get more info how to run it.
