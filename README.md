@@ -1,6 +1,4 @@
 # saltstack-monitor
-A bounde of scripts based on the SaltStack automation software which can help to monitor your minion(s) activity.
-
 This project is based on the saltstack automation framework. See https://www.saltstack.com/ for more info.
 
 Saltstack WebMonitor is used for the two purposes:
