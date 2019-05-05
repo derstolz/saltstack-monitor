@@ -33,6 +33,9 @@ def get_arguments():
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='Optional. Be verbose. Print the explain information about the most dangerous impacts. '
                              'Default is false')
+    parser.add_argument('-g', '--geolookup', action='store_true',
+                        help='Optional. Defines that Web Monitor should perform a geo-location lookup '
+                             'for the current impacts')
     options = parser.parse_args()
     if not options.saltstack and not options.config:
         parser.error('Use should provide something to do; '
@@ -63,6 +66,7 @@ class Impact:
         self.is_dangerous = is_dangerous
         self.is_pushed = is_pushed
         self.requests = []
+        self.geo_location = None
 
     """
         Print explaining information about this impact (source address, requests and hits).
@@ -158,10 +162,11 @@ class WebMonitor:
         Without this options, WebMonitor will simply analyze events and warn you about the most aggressive attempts.
 
         @:param be_verbose - increase verbosity, print detailed information about the most aggressive impacts
+        @:param geolookup - collect geo location info about current threats.
     """
 
     def __init__(self, minion_id=None, config_file=None, default_sleep_timer=None, download_data_since=None,
-                 banned_file=None, push_banned_list=False, be_verbose=False):
+                 banned_file=None, push_banned_list=False, be_verbose=False, geolookup=False):
         self.events = []
         if not minion_id and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
@@ -192,6 +197,7 @@ class WebMonitor:
                 self.banned_file = 'banned.txt'
             self.verbose = be_verbose
             self.remote_logs_file = '/var/log/apache2/access.log'
+            self.geolookup = geolookup
 
         self.is_alive = False
         self.threat_level = ThreatLevel.UNKNOWN
@@ -310,6 +316,8 @@ class WebMonitor:
 
         if self.should_push_banned_list:
             self.push()
+        if self.geolookup:
+            self.collect_geolookup()
 
     """
         Test that minion is reachable 
@@ -401,14 +409,15 @@ class WebMonitor:
         else:
             is_alive_message = 'Host is down'
 
-        report_message = f'\n\tStatus: {is_alive_message}'\
-                 f'\n\tThreat level: {self.threat_level.name}'
+        report_message = f'\n\tStatus: {is_alive_message}' \
+            f'\n\tThreat level: {self.threat_level.name}'
         if self.threat_level != ThreatLevel.UNKNOWN and len(self.events) > 0:
-            report_message+=f'\n\tTotal suspicious events received for last {self.download_data_since}: {len(self.events)}'\
-                 f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}'\
-                 f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} '\
-                 f'({sum(di.hits for di in self.dangerous_impacts)} hits)'\
-                 f'\n\tTotal IP addresses: {len(self.impacts)}'
+            report_message += f'\n\tTotal suspicious events received for last {self.download_data_since}: ' \
+                f'{len(self.events)}' \
+                f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}' \
+                f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} ' \
+                f'({sum(di.hits for di in self.dangerous_impacts)} hits)' \
+                f'\n\tTotal IP addresses: {len(self.impacts)}'
         if len(self.pushed_impacts) > 0:
             report_message += '\n\tPushed IP addresses to block: ' + str(len(self.pushed_impacts))
 
@@ -419,7 +428,48 @@ class WebMonitor:
         self.create_ban_statements()
 
     """
-        Push created ban statements to the minion. 
+    Collect geo-location results about threats location
+    """
+
+    def collect_geolookup(self):
+        def geo_lookup(ip):
+            import requests
+            import xml.etree.ElementTree as ET
+            url = f'http://api.geoiplookup.net/?query={ip}'
+
+            response = requests.get(url)
+
+            try:
+                if response.status_code == 200:
+                    root = ET.fromstring(response.text)
+                    geo_result = {}
+                    for child in root[0][0]:
+                        geo_result[child.tag.title()] = child.text
+                        # ISSUE with receiving '&' character literally (and probably others) in lookup response. Encoding?
+                    return geo_result
+                else:
+                    return None
+            except Exception as e:
+                print(f'Something went wrong during {ip} lookup: {e}')
+
+        if self.impacts and len(self.impacts) > 0:
+            geo_results = []
+            for imp in self.impacts:
+                imp.geo_location = {}
+                print('Collecting geo-lookup about ' + str(imp.source_address) + " --> ", end="")
+                geo = geo_lookup(imp.source_address)
+                if geo:
+                    print('OK')
+                    for k, v in geo.items():
+                        if k and v:
+                            print(k + ' --> ' + v)
+                    imp.geo_location = geo
+                    geo_results.append(geo)
+                else:
+                    print('FAILED')
+
+    """
+        Push created ban statements to the minion.
         This action (if succeed) will block the traffic between pushed address and the remote minion.
         After statement was pushed, address will be stored in memory and will not be pushed anymore.
     """
@@ -452,7 +502,8 @@ if options.config:
     web_monitor = WebMonitor(config_file=options.config,
                              default_sleep_timer=options.sleep_timer,
                              banned_file=options.banned,
-                             be_verbose=options.verbose)
+                             be_verbose=options.verbose,
+                             geolookup=options.geolookup)
     web_monitor.daemon()
 elif options.saltstack:
     minions = options.minion_id
@@ -465,7 +516,8 @@ elif options.saltstack:
                                              download_data_since=options.last,
                                              banned_file=options.banned,
                                              push_banned_list=options.push,
-                                             be_verbose=options.verbose)
+                                             be_verbose=options.verbose,
+                                             geolookup=options.geolookup)
                     web_monitor.work()
         else:
             for m in minions.split(','):
@@ -474,7 +526,8 @@ elif options.saltstack:
                                          download_data_since=options.last,
                                          banned_file=options.banned,
                                          push_banned_list=options.push,
-                                         be_verbose=options.verbose)
+                                         be_verbose=options.verbose,
+                                         geolookup=options.geolookup)
                 web_monitor.work()
     else:
         web_monitor = WebMonitor(minions,
@@ -482,7 +535,8 @@ elif options.saltstack:
                                  download_data_since=options.last,
                                  banned_file=options.banned,
                                  push_banned_list=options.push,
-                                 be_verbose=options.verbose)
+                                 be_verbose=options.verbose,
+                                 geolookup=options.geolookup)
         if options.daemon:
             web_monitor.daemon()
         else:

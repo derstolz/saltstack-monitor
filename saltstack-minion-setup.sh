@@ -14,9 +14,12 @@ apt install salt-api &&
 
 echo 'Add a master address to /etc/salt'
 
-echo "Enter a log path for the Web minion" &&
+echo "Enter a log path to be parsed by the Web Minion" &&
 read log_path &&
 export WEB_MINION_LOG_PATH=$log_path &&
 echo 'export WEB_MINION_LOG_PATH='$log_path >> ~/.bashrc &&
+
+link web_monitor_minion.py web-monitor-minion &&
+mv web-monitor-minion /usr/bin
 
 echo 'Done'.
