@@ -32,7 +32,7 @@ Saltstack WebMonitor is used for the three purposes:
 
 You can (and probably should) review the generated statements before pushing them, you also can receive a geolocation lookup about collected threats. You can run the web-monitor-master in daemon mode to keep watching your web-monitor-minion(s).
 <br/><br/> #<b>python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --verbose</b>
-<br/> to print explaining information about incoming events - and tell why some events was marked as dangerous and suggested to be blocked. 
+<br/> to print explaining information about incoming events - and tell you why some events were marked as dangerous and were suggested to be blocked. 
 <br/><br/> #<b>python3 web_monitor.py --saltstack --minion-id <i>minion_id</i> --geolookup</b>
 <br/> to perform a geolocation lookup to get overview about the source of the malicious activity.
 <br/><br/> use ./web_monitor.py --help to see more options.
