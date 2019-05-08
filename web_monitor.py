@@ -10,8 +10,9 @@ def get_arguments():
                         help='Use the specified config file with properties.')
     parser.add_argument('-s', '--saltstack', action='store_true',
                         help='Use Saltstack as a transport for your commands to the watched minions.')
-    parser.add_argument('-m', '--minion-id', dest='minion_id',
-                        help='Provide a string or a comma separated list of the minion id(s) '
+    parser.add_argument('-m', '--minions', dest='minions',
+                        help='Provide a string or a comma separated list of the minion id(s) and their log path '
+                             'e.g - prod212:/var/log/nginx/access.log '
                              'which you want to monitor and push the rules to')
     parser.add_argument('-st', '--sleep-timer', dest='sleep_timer',
                         help='Optional. Provide a sleep timer for the web monitor, in seconds. Default is 60s.')
@@ -40,8 +41,13 @@ def get_arguments():
     if not options.saltstack and not options.config:
         parser.error('Use should provide something to do; '
                      'at least a config file or --saltstack. Use --help for more info')
-    if not options.minion_id and not options.config:
+    if not options.minions and not options.config:
         parser.error('Minion ID should be provided, use --help for more info')
+    if not ':' in options.minions:
+        parser.error(
+            'Please, provide a correct minion pattern in the following format: '
+            'minion_id:/path/to/remote/logs/access.log. '
+            'Use --help for more info')
     return options
 
 
@@ -165,23 +171,31 @@ class WebMonitor:
         @:param geolookup - collect geo location info about current threats.
     """
 
-    def __init__(self, minion_id=None, config_file=None, default_sleep_timer=None, download_data_since=None,
+    def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
                  banned_file=None, push_banned_list=False, be_verbose=False, geolookup=False):
-        self.events = []
-        if not minion_id and not config_file:
+        if not minion and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
+        if ":" not in minion:
+            raise Exception("Please, provide a correct minion pattern in format - prod212:/path/to/log/file")
+
+        self.events = []
         if config_file:
             import configparser
             config = configparser.ConfigParser()
             config.read(config_file)
-            self.minion_id = config['Hosts']['Minions']
+            minion_name = config['Hosts']['Minions'].split(':')[0]
+            remote_log_path = config['Hosts']['Minions'].split(':')[1]
+            self.minion_id = minion_name
+            self.remote_logs_file = remote_log_path
             self.SLEEP_TIMER_IN_SEC = int(config['Monitor']['PollingIntervalInSeconds'])
             self.download_data_since = config['Monitor']['DownloadDataForLast']
             self.banned_file = config['Monitor']['BannedFile']
             self.should_push_banned_list = config['Monitor']['ShouldPushBannedList']
             self.verbose = config['Monitor']['Verbosity']
         else:
-            self.minion_id = minion_id
+            minion_name = minion.split(':')[0]
+            remote_log_path = minion.split(':')[1]
+            self.minion_id = minion_name
             if not default_sleep_timer:
                 self.SLEEP_TIMER_IN_SEC = 60
             else:
@@ -196,7 +210,7 @@ class WebMonitor:
             else:
                 self.banned_file = 'banned.txt'
             self.verbose = be_verbose
-            self.remote_logs_file = '/var/log/apache2/access.log'
+            self.remote_logs_file = remote_log_path
             self.geolookup = geolookup
 
         self.is_alive = False
@@ -211,9 +225,9 @@ class WebMonitor:
         Execute a command on the remote minion.
         Command will be executed on the minion with id stored in the self.minion_id
         
-        @:param bash_syntax - define that provided command is pure bash command e.g.: pwd && ls -l 
+        @:param bash_syntax - define that provided command is a pure bash command e.g.: pwd && ls -l 
                               that should be forwarded to the minion 'as is'
-        @:param salt_syntax - define that provided command is salt statement e.g.: salt prod1 cmd.run 'uname -a'
+        @:param salt_syntax - define that provided command is a salt statement e.g.: salt prod1 cmd.run 'uname -a'
                               and should be forwarded to the minion.
     """
 
@@ -236,7 +250,7 @@ class WebMonitor:
                 except:
                     self.log('Error on parsing response from the minion')
         except Exception as e:
-            self.log('Cannot execute command: ' + str(e))
+            return
 
     """
         Save a log message with a minion id and current time prefix
@@ -311,13 +325,12 @@ class WebMonitor:
     def work(self):
         self.ping()
         self.status()
-        self.analyze_threats()
+        if self.threat_level != ThreatLevel.UNKNOWN:
+            self.analyze_threats()
         self.report()
 
         if self.should_push_banned_list:
             self.push()
-        if self.geolookup:
-            self.collect_geolookup()
 
     """
         Test that minion is reachable 
@@ -325,17 +338,20 @@ class WebMonitor:
 
     def ping(self):
         error_message = 'The salt master could not be contacted.'
-        self.log('Receiving minion(s) status...')
+        self.log('Receiving ' + str(self.minion_id) + ' status...')
         try:
             minion_heartbeat = self.exec_on_minion(['salt', self.minion_id, 'test.ping'], salt_syntax=True)
             if minion_heartbeat and error_message not in str(minion_heartbeat):
                 self.is_alive = True
+        except KeyboardInterrupt:
+            print('\n\nInterrupted')
+            exit(1)
         except:
             self.is_alive = False
             return
 
     """
-        Receive input from the minion, parse them into events and identify current threat status.
+        Receive input from the minion, parse it into the events and identify current threat status.
     """
 
     def status(self):
@@ -345,7 +361,8 @@ class WebMonitor:
                 if self.download_data_since and len(self.download_data_since) < 12:
                     command = f'web-monitor-minion --path {self.remote_logs_file} --last "{self.download_data_since}"'
                     minion_response = self.exec_on_minion(command, bash_syntax=True)
-                    return list(minion_response)
+                    if minion_response:
+                        return list(minion_response)
 
             try:
                 r = get_last_events()
@@ -425,6 +442,8 @@ class WebMonitor:
         if self.verbose:
             for impact in self.dangerous_impacts:
                 impact.explain()
+        if self.geolookup:
+            self.collect_geolookup()
         self.create_ban_statements()
 
     """
@@ -497,19 +516,44 @@ class WebMonitor:
                 self.pushed_impacts.append(impact)
 
 
-options = get_arguments()
-if options.config:
-    web_monitor = WebMonitor(config_file=options.config,
-                             default_sleep_timer=options.sleep_timer,
-                             banned_file=options.banned,
-                             be_verbose=options.verbose,
-                             geolookup=options.geolookup)
-    web_monitor.daemon()
-elif options.saltstack:
-    minions = options.minion_id
-    if ',' in minions:
-        if options.daemon:
-            while True:
+def __main__():
+    options = get_arguments()
+    if options.config:
+        web_monitor = WebMonitor(config_file=options.config,
+                                 default_sleep_timer=options.sleep_timer,
+                                 banned_file=options.banned,
+                                 be_verbose=options.verbose,
+                                 geolookup=options.geolookup)
+        web_monitor.daemon()
+    elif options.saltstack:
+        minions = options.minions
+        if ',' in minions:
+            if options.daemon:
+                minions_ids_with_path = []
+                for m in minions.split(','):
+                    minions_ids_with_path.append(m)
+                monitors = []
+                for m in minions_ids_with_path:
+                    web_monitor = WebMonitor(m,
+                                             default_sleep_timer=options.sleep_timer,
+                                             download_data_since=options.last,
+                                             banned_file=options.banned,
+                                             push_banned_list=options.push,
+                                             be_verbose=options.verbose,
+                                             geolookup=options.geolookup)
+                    monitors.append(web_monitor)
+                while True:
+                    for web_monitor in monitors:
+                        web_monitor.work()
+                    import time
+                    sleep_timer = options.sleep_timer
+                    if not sleep_timer:
+                        sleep_timer = 60
+                    import datetime
+                    print(f'[master]:[{datetime.datetime.now()}] - Sleeping for the ' + str(sleep_timer / 60) + ' min(s)')
+                    time.sleep(sleep_timer)
+
+            else:
                 for m in minions.split(','):
                     web_monitor = WebMonitor(m,
                                              default_sleep_timer=options.sleep_timer,
@@ -520,24 +564,21 @@ elif options.saltstack:
                                              geolookup=options.geolookup)
                     web_monitor.work()
         else:
-            for m in minions.split(','):
-                web_monitor = WebMonitor(m,
-                                         default_sleep_timer=options.sleep_timer,
-                                         download_data_since=options.last,
-                                         banned_file=options.banned,
-                                         push_banned_list=options.push,
-                                         be_verbose=options.verbose,
-                                         geolookup=options.geolookup)
+            web_monitor = WebMonitor(minions,
+                                     default_sleep_timer=options.sleep_timer,
+                                     download_data_since=options.last,
+                                     banned_file=options.banned,
+                                     push_banned_list=options.push,
+                                     be_verbose=options.verbose,
+                                     geolookup=options.geolookup)
+            if options.daemon:
+                web_monitor.daemon()
+            else:
                 web_monitor.work()
-    else:
-        web_monitor = WebMonitor(minions,
-                                 default_sleep_timer=options.sleep_timer,
-                                 download_data_since=options.last,
-                                 banned_file=options.banned,
-                                 push_banned_list=options.push,
-                                 be_verbose=options.verbose,
-                                 geolookup=options.geolookup)
-        if options.daemon:
-            web_monitor.daemon()
-        else:
-            web_monitor.work()
+
+
+try:
+    __main__()
+except KeyboardInterrupt:
+    print('\n\nInterrupted')
+    exit(1)
