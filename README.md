@@ -24,19 +24,19 @@ Saltstack WebMonitor is used for the three purposes:
 <br>On the <b>minion</b> side:
 <br/>(Optional) make sure that you have a link '<i>web-monitor-minion</i>' to web_monitor_minion.py script in the /usr/bin directory, so master would be able to call your minion. Master will ask for a command e.g.: <i>'web-monitor-minion --path /var/log/nginx/access.log --last 10d</i>. In general, the saltstack-minion-setup.sh should do it for you.
 <br/><br/>On the <b>master</b> side:
-<br/># <b>python3 web_monitor.py --saltstack --minions <i>minions:/remote/path/to/logs/access.log</i> --daemon</b>
+<br/># <b>python3 web_monitor.py --saltstack --minions <i>id:/remote/path/to/logs/access.log</i> --daemon</b>
 <br/> to run the master in daemon monitor mode: interact with your minion (or minions - you can provide a comma (,) separated list of all your minions that your want to monitor). Master will print statistics about events received from the minion and suggest you to block the most aggressive addresses.
-<br/><br/>#<b>python3 web_monitor.py --saltstack --minions <i>minions:/remote/path/to/logs/access.log</i> --daemon --push</b>
+<br/><br/>#<b>python3 web_monitor.py --saltstack --minions <i>id:/remote/path/to/logs/access.log</i> --daemon --push</b>
 <br/> to run the master in daemon monitor mode and push iptables rules to the minion. e.g. of created rules: 'iptables -A INPUT --source 123.213.123.213 -j DROP'
 <br/><i>123.213.123.213 here is an IP addresses that was marked as a dangerous one (more than 100 hits)</i>
 
 <br/><br/>You can specify several minions:
-<br/># <b>python3 web_monitor.py --saltstack --minions <i>minions:/path/to/log,miniod_id2:/path/to/log</i></b>
+<br/># <b>python3 web_monitor.py --saltstack --minions <i>id:/path/to/log,id2:/path/to/log</i></b>
 
 You can (and probably should) review the generated statements before pushing them, you also can receive a geolocation lookup about collected threats. You can run the web-monitor-master in daemon mode to keep watching your web-monitor-minion(s).
-<br/><br/> #<b>python3 web_monitor.py --saltstack --minions <i>minions:/remote/path/to/logs/access.log</i> --verbose</b>
+<br/><br/> #<b>python3 web_monitor.py --saltstack --minions <i>id:/remote/path/to/logs/access.log</i> --verbose</b>
 <br/> to print explaining information about incoming events - and tell you why some events were marked as dangerous and were suggested to be blocked. 
-<br/><br/> #<b>python3 web_monitor.py --saltstack --minions <i>minions:/remote/path/to/logs/access.log</i> --geolookup</b>
+<br/><br/> #<b>python3 web_monitor.py --saltstack --minions <i>id:/remote/path/to/logs/access.log</i> --geolookup</b>
 <br/> to perform a geolocation lookup to get overview about the source of the malicious activity.
 <br/><br/> use ./web_monitor.py --help to see more options.
 
