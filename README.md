@@ -37,6 +37,6 @@ You can (and probably should) review the generated statements before pushing the
 <br/><br/> #<b>python3 web_monitor.py --saltstack --minions <i>id:/remote/path/to/logs/access.log</i> --verbose</b>
 <br/> to print explanatory information about incoming events - and tell you why some events were marked as dangerous and were suggested to be blocked.
 <br/><br/> #<b>python3 web_monitor.py --saltstack --minions <i>id:/remote/path/to/logs/access.log</i> --geolookup</b>
-<br/> to perform a geolocation lookup to get overview of the source of the malicious activity.
+<br/> to perform a geolocation lookup to get an overview of the source of the malicious activity.
 <br/><br/> use ./web_monitor.py --help to see more options.
 
