@@ -1,5 +1,5 @@
 # saltstack-monitor
-This project is based on the saltstack automation framework. See https://www.saltstack.com/ for more info.
+This project is based on the saltstack automation framework. See https://www.saltstack.com/ https://docs.saltstack.com/en/latest/topics/installation/index.html for more info.
 
 Saltstack WebMonitor is used for the three purposes:
 <br/>1. Communicate with a minion and ask him to collect web server's logs.
