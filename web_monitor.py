@@ -17,22 +17,23 @@ def get_arguments():
     parser.add_argument('-st', '--sleep-timer', dest='sleep_timer',
                         help='Optional. Provide a sleep timer for the web monitor, in seconds. Default is 60s.')
     parser.add_argument('-l', '--last', dest='last',
-                        help='Optional. Provide a time delta in "10d 8h" format '
+                        help='Optional. Provide a time delta in the following format: "10d 8h" '
                              'to receive data from the remote machine. Default is 20d')
     parser.add_argument('-d', '--daemon', action='store_true',
                         help='Optional. Run Web Monitor as a daemon. In daemon mode, '
                              'Web Monitor can periodically interact with your minions, '
-                             'receive their status and then print the current status. '
-                             'Without this options, Web Monitor will simply print the current status and exit.')
+                             'receive data from them and then print their current status. '
+                             'Without this options, Web Monitor will do its lifecycle for one time and exit.')
     parser.add_argument('-b', '--banned', dest='banned',
                         help='Optional. A file contains iptables block statement(s). '
                              'This file should exist and be writable for the script. '
-                             'If not provided, then file would be created and all statements will be written to it.')
+                             'If not provided, then file would be created in the same directory '
+                             'and all statements will be written to it.')
     parser.add_argument('-p', '--push', action='store_true',
                         help='Optional. Push generated block statements to the minion(s). '
-                             'They will be applied received statements as soon as they arrived. Default is false.')
+                             'They should be applied as soon as they arrived. Default is false.')
     parser.add_argument('-v', '--verbose', action='store_true',
-                        help='Optional. Be verbose. Print the explain information about the most dangerous impacts. '
+                        help='Optional. Print the explain information about the most dangerous impacts. '
                              'Default is false')
     parser.add_argument('-g', '--geolookup', action='store_true',
                         help='Optional. Defines that Web Monitor should perform a geo-location lookup '
@@ -184,9 +185,8 @@ class WebMonitor:
             config = configparser.ConfigParser()
             config.read(config_file)
             minion_name = config['Hosts']['Minions'].split(':')[0]
-            remote_log_path = config['Hosts']['Minions'].split(':')[1]
             self.minion_id = minion_name
-            self.remote_logs_file = remote_log_path
+            self.remote_logs_file = config['Hosts']['Minions'].split(':')[1]
             self.SLEEP_TIMER_IN_SEC = int(config['Monitor']['PollingIntervalInSeconds'])
             self.download_data_since = config['Monitor']['DownloadDataForLast']
             self.banned_file = config['Monitor']['BannedFile']
@@ -201,7 +201,6 @@ class WebMonitor:
             else:
                 self.SLEEP_TIMER_IN_SEC = int(default_sleep_timer)
             if not download_data_since:
-                self.log('Time for downloading data from was not provided, falling back to the default: 20d')
                 self.download_data_since = '20d'
             else:
                 self.download_data_since = download_data_since
@@ -327,10 +326,11 @@ class WebMonitor:
         self.status()
         if self.threat_level != ThreatLevel.UNKNOWN:
             self.analyze_threats()
-        self.report()
-
         if self.should_push_banned_list:
             self.push()
+        self.report()
+
+
 
     """
         Test that minion is reachable 
@@ -398,7 +398,6 @@ class WebMonitor:
             read_fd = open(self.banned_file, 'r', encoding='utf-8')
             existing_statements = read_fd.readlines()
             saved_count = 0
-            unsaved_count = 0
             for impact in self.dangerous_impacts:
                 command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
                 is_exist = any(command == st.replace('\n', '') for st in existing_statements)
@@ -408,7 +407,7 @@ class WebMonitor:
                     write_fd.write('\n')
                     write_fd.flush()
                 else:
-                    unsaved_count += 1
+                    self.log(f'{impact.source_address} was already known before.')
             write_fd.close()
             read_fd.close()
             if saved_count > 0 and not self.should_push_banned_list:
@@ -510,6 +509,7 @@ class WebMonitor:
         for impact in self.dangerous_impacts:
             source = impact.source_address
             if any(source == i.source_address for i in self.pushed_impacts):
+                self.log(source + ' was already pushed before.')
                 continue
             else:
                 execute_ban_on_minion(address=f'{impact.source_address}')
@@ -550,7 +550,8 @@ def __main__():
                     if not sleep_timer:
                         sleep_timer = 60
                     import datetime
-                    print(f'[master]:[{datetime.datetime.now()}] - Sleeping for the ' + str(sleep_timer / 60) + ' min(s)')
+                    print(
+                        f'[master]:[{datetime.datetime.now()}] - Sleeping for the ' + str(sleep_timer / 60) + ' min(s)')
                     time.sleep(sleep_timer)
 
             else:
