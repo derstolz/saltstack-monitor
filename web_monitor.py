@@ -137,13 +137,14 @@ class ThreatLevel(Enum):
 
 
 class Event:
-    def __init__(self, source, date, request, response, referer, user_agent, received_event=None):
+    def __init__(self, source, date, request, response, referer, user_agent, is_suspicious, received_event=None):
         self.source = source
         self.date = date
         self.request = request
         self.response = response
         self.referer = referer
         self.user_agent = user_agent
+        self.is_suspicious = is_suspicious
         self.received_event = received_event
 
 
@@ -180,6 +181,7 @@ class WebMonitor:
             raise Exception("Please, provide a correct minion pattern in format - prod212:/path/to/log/file")
 
         self.events = []
+        self.suspicious_events = []
         if config_file:
             import configparser
             config = configparser.ConfigParser()
@@ -187,7 +189,7 @@ class WebMonitor:
             minion_name = config['Hosts']['Minions'].split(':')[0]
             self.minion_id = minion_name
             self.remote_logs_file = config['Hosts']['Minions'].split(':')[1]
-            self.SLEEP_TIMER_IN_SEC = int(config['Monitor']['PollingIntervalInSeconds'])
+            self.sleep_timer = int(config['Monitor']['PollingIntervalInSeconds'])
             self.download_data_since = config['Monitor']['DownloadDataForLast']
             self.banned_file = config['Monitor']['BannedFile']
             self.should_push_banned_list = config['Monitor']['ShouldPushBannedList']
@@ -197,17 +199,17 @@ class WebMonitor:
             remote_log_path = minion.split(':')[1]
             self.minion_id = minion_name
             if not default_sleep_timer:
-                self.SLEEP_TIMER_IN_SEC = 60
+                self.sleep_timer = 60
             else:
-                self.SLEEP_TIMER_IN_SEC = int(default_sleep_timer)
+                self.sleep_timer = int(default_sleep_timer)
             if not download_data_since:
-                self.download_data_since = '20d'
+                self.download_data_since = '1d'
             else:
                 self.download_data_since = download_data_since
             if banned_file:
                 self.banned_file = banned_file
             else:
-                self.banned_file = 'banned.txt'
+                self.banned_file = self.minion_id + '_' + 'banned.txt'
             self.verbose = be_verbose
             self.remote_logs_file = remote_log_path
             self.geolookup = geolookup
@@ -267,10 +269,11 @@ class WebMonitor:
 
     def daemon(self):
         import time
+        from datetime import timedelta
         while True:
             self.work()
-            self.log(f'Sleeping for the {self.SLEEP_TIMER_IN_SEC / 60} min(s)')
-            time.sleep(int(self.SLEEP_TIMER_IN_SEC))
+            self.log(f'Sleeping for the {str(timedelta(seconds=self.sleep_timer))} sec(s)')
+            time.sleep(int(self.sleep_timer))
 
     """
         Convert incoming events from the minion into the Event object and store them in web-monitor memory.
@@ -282,7 +285,7 @@ class WebMonitor:
             dict = ast.literal_eval(e)
             if len(dict.keys()) > 0:
                 self.threat_level = ThreatLevel.GREEN
-            if dict and dict['is_suspicious']:
+            if dict:
                 event = Event(
                     dict['source'],
                     dict['date'],
@@ -290,6 +293,7 @@ class WebMonitor:
                     dict['response'],
                     dict['referer'],
                     dict['useragent'],
+                    dict['is_suspicious'],
                     e)
                 return event
 
@@ -297,6 +301,8 @@ class WebMonitor:
             eve = str_to_event_object(e)
             if eve:
                 self.events.append(eve)
+                if eve.is_suspicious:
+                    self.suspicious_events.append(eve)
 
     """
         Identify current minion status. 
@@ -305,8 +311,8 @@ class WebMonitor:
     """
 
     def identify_threat_level(self):
-        if self.events:
-            number_of_events = len(self.events)
+        if self.suspicious_events:
+            number_of_events = len(self.suspicious_events)
 
             if number_of_events < 100:
                 self.threat_level = ThreatLevel.GREEN
@@ -326,11 +332,11 @@ class WebMonitor:
         self.status()
         if self.threat_level != ThreatLevel.UNKNOWN:
             self.analyze_threats()
+            self.analyze_all_events()
+            self.create_ban_statements()
         if self.should_push_banned_list:
             self.push()
         self.report()
-
-
 
     """
         Test that minion is reachable 
@@ -358,6 +364,7 @@ class WebMonitor:
         if self.is_alive:
             def get_last_events():
                 self.events.clear()
+                self.suspicious_events.clear()
                 if self.download_data_since and len(self.download_data_since) < 12:
                     command = f'web-monitor-minion --path {self.remote_logs_file} --last "{self.download_data_since}"'
                     minion_response = self.exec_on_minion(command, bash_syntax=True)
@@ -378,15 +385,17 @@ class WebMonitor:
     """
 
     def analyze_threats(self):
-        if not self.events or len(self.events) == 0:
+        if not self.suspicious_events or len(self.suspicious_events) == 0:
             return
         self.impacts.clear()
         self.dangerous_impacts.clear()
 
-        self.impacts = Impact.calculate_impact_statistic(events=self.events)
+        self.impacts = Impact.calculate_impact_statistic(events=self.suspicious_events)
         for i in self.impacts:
             if i.is_dangerous:
                 self.dangerous_impacts.append(i)
+        if self.geolookup:
+            self.collect_geolookup()
 
     """
         Parse created impacts, make a list with ban statements and store them into file.
@@ -407,7 +416,7 @@ class WebMonitor:
                     write_fd.write('\n')
                     write_fd.flush()
                 else:
-                    self.log(f'{impact.source_address} was already known before.')
+                    self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
             write_fd.close()
             read_fd.close()
             if saved_count > 0 and not self.should_push_banned_list:
@@ -427,13 +436,16 @@ class WebMonitor:
 
         report_message = f'\n\tStatus: {is_alive_message}' \
             f'\n\tThreat level: {self.threat_level.name}'
-        if self.threat_level != ThreatLevel.UNKNOWN and len(self.events) > 0:
-            report_message += f'\n\tTotal suspicious events received for last {self.download_data_since}: ' \
-                f'{len(self.events)}' \
-                f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}' \
-                f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} ' \
-                f'({sum(di.hits for di in self.dangerous_impacts)} hits)' \
-                f'\n\tTotal IP addresses: {len(self.impacts)}'
+        if self.threat_level != ThreatLevel.UNKNOWN and len(self.suspicious_events) > 0:
+            report_message += \
+                f'\n\tTotal requests received for last {self.download_data_since}: ' \
+                    f'{len(self.events)}' \
+                    f'\n\tSuspicious requests received for last {self.download_data_since}: ' \
+                    f'{len(self.suspicious_events)}' \
+                    f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}' \
+                    f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} ' \
+                    f'({sum(di.hits for di in self.dangerous_impacts)} hits)' \
+                    f'\n\tTotal IP addresses: {len(self.impacts)}'
         if len(self.pushed_impacts) > 0:
             report_message += '\n\tPushed IP addresses to block: ' + str(len(self.pushed_impacts))
 
@@ -441,9 +453,6 @@ class WebMonitor:
         if self.verbose:
             for impact in self.dangerous_impacts:
                 impact.explain()
-        if self.geolookup:
-            self.collect_geolookup()
-        self.create_ban_statements()
 
     """
     Collect geo-location results about threats location
@@ -471,7 +480,6 @@ class WebMonitor:
                 print(f'Something went wrong during {ip} lookup: {e}')
 
         if self.impacts and len(self.impacts) > 0:
-            geo_results = []
             for imp in self.impacts:
                 imp.geo_location = {}
                 print('Collecting geo-lookup about ' + str(imp.source_address) + " --> ", end="")
@@ -482,7 +490,6 @@ class WebMonitor:
                         if k and v:
                             print(k + ' --> ' + v)
                     imp.geo_location = geo
-                    geo_results.append(geo)
                 else:
                     print('FAILED')
 
@@ -493,8 +500,9 @@ class WebMonitor:
     """
 
     def push(self):
+        import re
         def execute_ban_on_minion(address):
-            if address and address != "":
+            if address and address != "" and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", address):
                 print('Pushing new rule: ' + address, end='')
                 command = \
                     f'sudo /sbin/iptables ' \
@@ -509,11 +517,18 @@ class WebMonitor:
         for impact in self.dangerous_impacts:
             source = impact.source_address
             if any(source == i.source_address for i in self.pushed_impacts):
-                self.log(source + ' was already pushed before.')
+                self.log(source + f' ({impact.hits} hit(s)) was already pushed before.')
                 continue
             else:
                 execute_ban_on_minion(address=f'{impact.source_address}')
                 self.pushed_impacts.append(impact)
+
+    def analyze_all_events(self):
+        impacts = Impact.calculate_impact_statistic(events=self.events)
+        for i in impacts:
+            if i.hits > 10000:
+                i.is_dangerous = True
+                self.dangerous_impacts.append(i)
 
 
 def __main__():
@@ -549,9 +564,10 @@ def __main__():
                     sleep_timer = options.sleep_timer
                     if not sleep_timer:
                         sleep_timer = 60
-                    import datetime
+                    from datetime import datetime, timedelta
                     print(
-                        f'[master]:[{datetime.datetime.now()}] - Sleeping for the ' + str(sleep_timer / 60) + ' min(s)')
+                        f'[master]:[{datetime.now()}] - Sleeping for the ' + str(
+                            timedelta(seconds=sleep_timer)) + ' sec(s)')
                     time.sleep(sleep_timer)
 
             else:
