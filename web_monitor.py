@@ -496,6 +496,7 @@ class WebMonitor:
 
                     write_fd_banned_explained.write(command + ' --> \n')
                     write_fd_banned_explained.write('\n'.join(impact.requests))
+                    write_fd_banned_explained.write('\n')
                     write_fd_banned_explained.flush()
                 else:
                     self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
