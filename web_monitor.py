@@ -14,6 +14,10 @@ def get_arguments():
                         help='Provide a string or a comma separated list of the minion id(s) and their log path '
                              'e.g - prod212:/var/log/nginx/access.log '
                              'which you want to monitor and push the rules to')
+    parser.add_argument('-sc', '--suspicious-chunks', dest='suspicious_chunks',
+                        help='Provide a new-line separated list of the chunks that should be checked '
+                             'in the incoming logs from the minion. If a log line contains any of the entry from this '
+                             'list, then it will be marked as suspicious request.')
     parser.add_argument('-st', '--sleep-timer', dest='sleep_timer',
                         help='Optional. Provide a sleep timer for the web monitor, in seconds. Default is 60s.')
     parser.add_argument('-l', '--last', dest='last',
@@ -38,18 +42,86 @@ def get_arguments():
     parser.add_argument('-g', '--geolookup', action='store_true',
                         help='Optional. Defines that Web Monitor should perform a geo-location lookup '
                              'for the current impacts')
+
     options = parser.parse_args()
     if not options.saltstack and not options.config:
         parser.error('Use should provide something to do; '
                      'at least a config file or --saltstack. Use --help for more info')
     if not options.minions and not options.config:
         parser.error('Minion ID should be provided, use --help for more info')
-    if not ':' in options.minions:
+    if not options.config and not ':' in options.minions:
         parser.error(
             'Please, provide a correct minion pattern in the following format: '
             'minion_id:/path/to/remote/logs/access.log. '
             'Use --help for more info')
+    if not options.config and (not options.suspicious_chunks or len(options.suspicious_chunks) < 1):
+        parser.error('You have to provide a new-line separated list to check and compare the incoming logs with. '
+                     'Use --help for more info')
     return options
+
+
+import datetime
+import re
+
+
+class AccessLogParser:
+    def __init__(self, suspicious_chunks, logs, duration_time):
+        if not suspicious_chunks or len(suspicious_chunks) < 1:
+            raise Exception("There are no masks or patterns to look for. "
+                            "You have to provide a list with string values to compare requests with them.")
+        if not logs or type(logs) != list:
+            raise Exception("Incorrect value passed for the logs. It should be a list of lines from access.log")
+        if not duration_time:
+            duration_time = '1d'
+        self.log_pattern_rgx = r'(?P<source>.*) - - ' \
+                               r'\[(?P<date>.*) .*\] ' \
+                               r'\"(?P<request>.*)\" ' \
+                               r'(?P<response>\d{3} \d*) ' \
+                               r'\"(?P<referer>.*)\" ' \
+                               r'\"(?P<useragent>.*)\"'
+        self.suspicious_chunks = suspicious_chunks
+        self.last_time = self.parse_last_time(duration_time)
+        self.logs = logs
+
+    def parse_last_time(self, last):
+        try:
+            timedelta_string = last
+            td = {}
+            _days = re.search(r'\d*(?=d)', timedelta_string)
+            if _days: td['days'] = int(_days.group(0))
+            _hours = re.search(r'\d*(?=h)', timedelta_string)
+            if _hours: td['hours'] = int(_hours.group(0))
+            _minutes = re.search(r'\d*(?=m)', timedelta_string)
+            if _minutes: td['minutes'] = int(_minutes.group(0))
+        except Exception as e:
+            print('ERROR PARSING LOGS: ' + str(e))
+
+        parsing_start_time = datetime.datetime.now() - datetime.timedelta(days=td.pop('days', 0),
+                                                                          hours=td.pop('hours', 0),
+                                                                          minutes=td.pop('minutes', 0))
+        return parsing_start_time
+
+    def parse_logs(self):
+        parsed_logs = []
+        for line in self.logs:
+            try:
+                log_entry = re.search(self.log_pattern_rgx, line)
+                log_timestamp = datetime.datetime.strptime(log_entry['date'], "%d/%b/%Y:%H:%M:%S")
+
+                if log_timestamp > self.last_time:
+                    log = {'source': log_entry['source'],
+                           'date': log_entry['date'],
+                           'request': log_entry['request'],
+                           'response': log_entry['response'],
+                           'referer': log_entry['referer'],
+                           'useragent': log_entry['useragent'],
+                           'is_suspicious': any([chunk in log_entry['request'] for chunk in self.suspicious_chunks])}
+                    parsed_logs.append(log)
+            except Exception as e:
+                print('ERROR PARSING LOG LINE: ' + str(e))
+
+        # print(f"Parsed {len(parsed_logs)} log entries.")
+        return parsed_logs
 
 
 """
@@ -174,11 +246,13 @@ class WebMonitor:
     """
 
     def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
-                 banned_file=None, push_banned_list=False, be_verbose=False, geolookup=False):
+                 banned_file=None, push_banned_list=False, be_verbose=False, geolookup=False, suspicious_chunks=None):
         if not minion and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
-        if ":" not in minion:
+        if ":/" not in minion:
             raise Exception("Please, provide a correct minion pattern in format - prod212:/path/to/log/file")
+        if not suspicious_chunks or len(suspicious_chunks) < 1:
+            raise Exception('You have to provide a new-line separated list to check and compare the incoming logs with.')
 
         self.events = []
         self.suspicious_events = []
@@ -194,6 +268,7 @@ class WebMonitor:
             self.banned_file = config['Monitor']['BannedFile']
             self.should_push_banned_list = config['Monitor']['ShouldPushBannedList']
             self.verbose = config['Monitor']['Verbosity']
+            self.suspicious_chunks = config['Monitor']['SuspiciousChunksFile']
         else:
             minion_name = minion.split(':')[0]
             remote_log_path = minion.split(':')[1]
@@ -213,13 +288,14 @@ class WebMonitor:
             self.verbose = be_verbose
             self.remote_logs_file = remote_log_path
             self.geolookup = geolookup
+            self.suspicious_chunks = suspicious_chunks
 
         self.is_alive = False
         self.threat_level = ThreatLevel.UNKNOWN
         self.impacts = []
         self.dangerous_impacts = []
         self.pushed_impacts = []
-        self.banned_explained_file = 'banned_explained.txt'
+        self.banned_explained_file = self.minion_id + '_' + 'banned_explained.txt'
         self.should_push_banned_list = push_banned_list
 
     """
@@ -281,8 +357,7 @@ class WebMonitor:
 
     def parse_events(self, events):
         def str_to_event_object(e):
-            import ast
-            dict = ast.literal_eval(e)
+            dict = e
             if len(dict.keys()) > 0:
                 self.threat_level = ThreatLevel.GREEN
             if dict:
@@ -363,10 +438,14 @@ class WebMonitor:
     def status(self):
         if self.is_alive:
             def get_last_events():
+                if not self.remote_logs_file.startswith('/var/log'):
+                    self.log('REMOTE LOG PATH CONTAINS INCORRECT VALUES: ' + str(
+                        self.remote_logs_file) + '. Please provide the file path starting with /var/log')
+                    return
                 self.events.clear()
                 self.suspicious_events.clear()
                 if self.download_data_since and len(self.download_data_since) < 12:
-                    command = f'web-monitor-minion --path {self.remote_logs_file} --last "{self.download_data_since}"'
+                    command = f'cat {self.remote_logs_file}'
                     minion_response = self.exec_on_minion(command, bash_syntax=True)
                     if minion_response:
                         return list(minion_response)
@@ -377,7 +456,9 @@ class WebMonitor:
                 return
             if r and len(r) > 3:
                 events = r[3:-1]
-                self.parse_events(events)
+                log_parser = AccessLogParser([''], events, self.download_data_since)
+                parsed_logs = log_parser.parse_logs()
+                self.parse_events(parsed_logs)
             self.identify_threat_level()
 
     """
@@ -404,6 +485,7 @@ class WebMonitor:
     def create_ban_statements(self):
         if len(self.dangerous_impacts) > 0:
             write_fd = open(self.banned_file, 'a', encoding='utf-8')
+            write_fd_banned_explained = open(self.banned_explained_file, 'a', encoding='utf-8')
             read_fd = open(self.banned_file, 'r', encoding='utf-8')
             existing_statements = read_fd.readlines()
             saved_count = 0
@@ -415,9 +497,14 @@ class WebMonitor:
                     write_fd.write(command)
                     write_fd.write('\n')
                     write_fd.flush()
+
+                    write_fd_banned_explained.write(command + ' --> \n')
+                    write_fd_banned_explained.write('\n'.join(impact.requests))
+                    write_fd_banned_explained.flush()
                 else:
                     self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
             write_fd.close()
+            write_fd_banned_explained.close()
             read_fd.close()
             if saved_count > 0 and not self.should_push_banned_list:
                 self.log(
@@ -502,7 +589,7 @@ class WebMonitor:
     def push(self):
         import re
         def execute_ban_on_minion(address):
-            if address and address != "" and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", address):
+            if address and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", address):
                 print('Pushing new rule: ' + address, end='')
                 command = \
                     f'sudo /sbin/iptables ' \
@@ -531,6 +618,7 @@ class WebMonitor:
                 self.dangerous_impacts.append(i)
 
 
+
 def __main__():
     options = get_arguments()
     if options.config:
@@ -542,6 +630,10 @@ def __main__():
         web_monitor.daemon()
     elif options.saltstack:
         minions = options.minions
+        suspicious_chunks = []
+        with open(options.suspicious_chunks, 'r', encoding='utf-8') as sc_file:
+            for line in sc_file:
+                suspicious_chunks.append(line.replace('\n', ''))
         if ',' in minions:
             if options.daemon:
                 minions_ids_with_path = []
@@ -555,7 +647,8 @@ def __main__():
                                              banned_file=options.banned,
                                              push_banned_list=options.push,
                                              be_verbose=options.verbose,
-                                             geolookup=options.geolookup)
+                                             geolookup=options.geolookup,
+                                             suspicious_chunks=suspicious_chunks)
                     monitors.append(web_monitor)
                 while True:
                     for web_monitor in monitors:
@@ -578,7 +671,8 @@ def __main__():
                                              banned_file=options.banned,
                                              push_banned_list=options.push,
                                              be_verbose=options.verbose,
-                                             geolookup=options.geolookup)
+                                             geolookup=options.geolookup,
+                                             suspicious_chunks=suspicious_chunks)
                     web_monitor.work()
         else:
             web_monitor = WebMonitor(minions,
@@ -587,7 +681,8 @@ def __main__():
                                      banned_file=options.banned,
                                      push_banned_list=options.push,
                                      be_verbose=options.verbose,
-                                     geolookup=options.geolookup)
+                                     geolookup=options.geolookup,
+                                     suspicious_chunks=suspicious_chunks)
             if options.daemon:
                 web_monitor.daemon()
             else:
