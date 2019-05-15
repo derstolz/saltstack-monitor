@@ -11,7 +11,7 @@ def get_arguments():
     parser.add_argument('-s', '--saltstack', action='store_true',
                         help='Use Saltstack as a transport for your commands to the watched minions.')
     parser.add_argument('-m', '--minions', dest='minions',
-                        help='Provide a string or a comma separated list of the minion id(s) and their log path '
+                        help='Provide a file with new-line separated list of the minion id(s) and their log path '
                              'e.g - prod212:/var/log/nginx/access.log '
                              'which you want to monitor and push the rules to')
     parser.add_argument('-sc', '--suspicious-chunks', dest='suspicious_chunks',
@@ -48,12 +48,7 @@ def get_arguments():
         parser.error('Use should provide something to do; '
                      'at least a config file or --saltstack. Use --help for more info')
     if not options.minions and not options.config:
-        parser.error('Minion ID should be provided, use --help for more info')
-    if not options.config and not ':' in options.minions:
-        parser.error(
-            'Please, provide a correct minion pattern in the following format: '
-            'minion_id:/path/to/remote/logs/access.log. '
-            'Use --help for more info')
+        parser.error('Minion(s) file should be provided, use --help for more info')
     if not options.config and (not options.suspicious_chunks or len(options.suspicious_chunks) < 1):
         parser.error('You have to provide a new-line separated list to check and compare the incoming logs with. '
                      'Use --help for more info')
@@ -252,7 +247,8 @@ class WebMonitor:
         if ":/" not in minion:
             raise Exception("Please, provide a correct minion pattern in format - prod212:/path/to/log/file")
         if not suspicious_chunks or len(suspicious_chunks) < 1:
-            raise Exception('You have to provide a new-line separated list to check and compare the incoming logs with.')
+            raise Exception(
+                'You have to provide a new-line separated list to check and compare the incoming logs with.')
 
         self.events = []
         self.suspicious_events = []
@@ -618,7 +614,6 @@ class WebMonitor:
                 self.dangerous_impacts.append(i)
 
 
-
 def __main__():
     options = get_arguments()
     if options.config:
@@ -629,18 +624,21 @@ def __main__():
                                  geolookup=options.geolookup)
         web_monitor.daemon()
     elif options.saltstack:
-        minions = options.minions
+        minions = []
         suspicious_chunks = []
         with open(options.suspicious_chunks, 'r', encoding='utf-8') as sc_file:
             for line in sc_file:
                 suspicious_chunks.append(line.replace('\n', ''))
-        if ',' in minions:
+        with open(options.minions, 'r', encoding='utf-8') as minions_file:
+            for line in minions_file:
+                minions.append(line.replace('\n', ''))
+        if len(minions) == 0:
+            raise Exception(
+                "Minion(s) list is empty. Please, specifiy a new-line separated file with minion(s) and their log path")
+        if len(minions) > 1:
             if options.daemon:
-                minions_ids_with_path = []
-                for m in minions.split(','):
-                    minions_ids_with_path.append(m)
                 monitors = []
-                for m in minions_ids_with_path:
+                for m in minions:
                     web_monitor = WebMonitor(m,
                                              default_sleep_timer=options.sleep_timer,
                                              download_data_since=options.last,
@@ -664,7 +662,7 @@ def __main__():
                     time.sleep(sleep_timer)
 
             else:
-                for m in minions.split(','):
+                for m in minions:
                     web_monitor = WebMonitor(m,
                                              default_sleep_timer=options.sleep_timer,
                                              download_data_since=options.last,
@@ -675,7 +673,7 @@ def __main__():
                                              suspicious_chunks=suspicious_chunks)
                     web_monitor.work()
         else:
-            web_monitor = WebMonitor(minions,
+            web_monitor = WebMonitor(minions[0],
                                      default_sleep_timer=options.sleep_timer,
                                      download_data_since=options.last,
                                      banned_file=options.banned,
