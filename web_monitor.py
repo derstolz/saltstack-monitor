@@ -51,6 +51,8 @@ def get_arguments():
     parser.add_argument('-g', '--geolookup', action='store_true',
                         help='Optional. Defines that Web Monitor should perform a geo-location lookup '
                              'for the current impacts')
+    parser.add_argument('-bt', '--ban-timer', dest='ban_timer',
+                        help='Optional. Dictates how long the host is banned for, e.g. "1 hour"; "3 days"; "1 minute"')
 
     options = parser.parse_args()
     if not options.saltstack and not options.config:
@@ -61,6 +63,8 @@ def get_arguments():
     if not options.config and (not options.suspicious_chunks or len(options.suspicious_chunks) < 1):
         parser.error('You have to provide a new-line separated list to check and compare the incoming logs with. '
                      'Use --help for more info')
+    if options.ban_timer and not any(t in options.ban_timer for t in ['hour', 'minute', 'day']):
+        parser.error('Please provide a correct ban_timer value, e.g. "1 hour"; "3 days"; "1 minute"')
     return options
 
 
@@ -246,7 +250,7 @@ class WebMonitor:
     """
 
     def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
-                 banned_file=None, ban_timer=datetime.timedelta(hours=1), push_banned_list=False, be_verbose=False, geolookup=False, suspicious_chunks=None):
+                 banned_file=None, ban_timer='1 hour', push_banned_list=False, be_verbose=False, geolookup=False, suspicious_chunks=None):
         if not minion and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
         if ":/" not in minion:
@@ -254,6 +258,8 @@ class WebMonitor:
         if not suspicious_chunks or len(suspicious_chunks) < 1:
             raise Exception(
                 'You have to provide a new-line separated list to check and compare the incoming logs with.')
+        if ban_timer != '1 hour' and not any(t in ban_timer for t in ['hour', 'minute', 'day']):
+            raise Exception('Please provide a correct ban_timer value, e.g. "1 hour"; "3 days"; "1 minute"')
 
         self.events = []
         self.suspicious_events = []
@@ -486,7 +492,8 @@ class WebMonitor:
             with open(self.banned_file, 'a', encoding='utf-8') as write_fd:
                 saved_count = 0
                 for impact in self.dangerous_impacts:
-                    command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
+                    # command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
+                    command = f"iptables -I INPUT -s {impact.source_address} -j DROP && at now + {self.ban_timer} <<< 'iptables -D INPUT -s {impact.source_address} -j DROP'"
                     is_exist = any(command == st.replace('\n', '') for st in existing_statements)
                     if not is_exist:
                         saved_count += 1
@@ -494,7 +501,7 @@ class WebMonitor:
                         write_fd.write('\n')
                         write_fd.flush()
                         with open(self.banned_explained_file, 'a', encoding='utf-8') as write_fd_banned_explained:
-                            explanation = {'banned_until': datetime.datetime.now() + self.ban_timer,
+                            explanation = {'ban_timer': self.ban_timer,
                                            'command': command,
                                            'requests': impact.requests}
                             json.dump(explanation, write_fd_banned_explained)
