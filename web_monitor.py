@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 from enum import Enum
+import datetime
+import time
+import configparser
+import argparse
+import re
+import xml.etree.ElementTree as ET
+import subprocess
+import json
+
+import requests
 
 
 def get_arguments():
-    import argparse
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', dest='config',
@@ -53,10 +62,6 @@ def get_arguments():
         parser.error('You have to provide a new-line separated list to check and compare the incoming logs with. '
                      'Use --help for more info')
     return options
-
-
-import datetime
-import re
 
 
 class AccessLogParser:
@@ -241,7 +246,7 @@ class WebMonitor:
     """
 
     def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
-                 banned_file=None, push_banned_list=False, be_verbose=False, geolookup=False, suspicious_chunks=None):
+                 banned_file=None, ban_timer=datetime.timedelta(hours=1), push_banned_list=False, be_verbose=False, geolookup=False, suspicious_chunks=None):
         if not minion and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
         if ":/" not in minion:
@@ -253,7 +258,6 @@ class WebMonitor:
         self.events = []
         self.suspicious_events = []
         if config_file:
-            import configparser
             config = configparser.ConfigParser()
             config.read(config_file)
             minion_name = config['Hosts']['Minions'].split(':')[0]
@@ -281,6 +285,7 @@ class WebMonitor:
                 self.banned_file = banned_file
             else:
                 self.banned_file = self.minion_id + '_' + 'banned.txt'
+            self.ban_timer = ban_timer
             self.verbose = be_verbose
             self.remote_logs_file = remote_log_path
             self.geolookup = geolookup
@@ -291,7 +296,7 @@ class WebMonitor:
         self.impacts = []
         self.dangerous_impacts = []
         self.pushed_impacts = []
-        self.banned_explained_file = self.minion_id + '_' + 'banned_explained.txt'
+        self.banned_explained_file = self.minion_id + '_' + 'banned_explained.json'
         self.should_push_banned_list = push_banned_list
 
     """
@@ -305,7 +310,6 @@ class WebMonitor:
     """
 
     def exec_on_minion(self, command, bash_syntax=False, salt_syntax=False):
-        import subprocess
         if not bash_syntax and not salt_syntax:
             raise Exception("No syntax scheme provided, you should choose bash_syntax or salt_syntax")
 
@@ -331,7 +335,6 @@ class WebMonitor:
     """
 
     def log(self, msg):
-        import datetime
         print(f'[{self.minion_id}]:[{datetime.datetime.now()}] - {msg}')
 
     """
@@ -340,11 +343,9 @@ class WebMonitor:
     """
 
     def daemon(self):
-        import time
-        from datetime import timedelta
         while True:
             self.work()
-            self.log(f'Sleeping for the {str(timedelta(seconds=self.sleep_timer))} sec(s)')
+            self.log(f'Sleeping for the {str(datetime.timedelta(seconds=self.sleep_timer))} sec(s)')
             time.sleep(int(self.sleep_timer))
 
     """
@@ -480,29 +481,26 @@ class WebMonitor:
 
     def create_ban_statements(self):
         if len(self.dangerous_impacts) > 0:
-            write_fd = open(self.banned_file, 'a', encoding='utf-8')
-            write_fd_banned_explained = open(self.banned_explained_file, 'a', encoding='utf-8')
-            read_fd = open(self.banned_file, 'r', encoding='utf-8')
-            existing_statements = read_fd.readlines()
-            saved_count = 0
-            for impact in self.dangerous_impacts:
-                command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
-                is_exist = any(command == st.replace('\n', '') for st in existing_statements)
-                if not is_exist:
-                    saved_count += 1
-                    write_fd.write(command)
-                    write_fd.write('\n')
-                    write_fd.flush()
+            with open(self.banned_file, 'r', encoding='utf-8') as read_fd:
+                existing_statements = read_fd.readlines()
+            with open(self.banned_file, 'a', encoding='utf-8') as write_fd:
+                saved_count = 0
+                for impact in self.dangerous_impacts:
+                    command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
+                    is_exist = any(command == st.replace('\n', '') for st in existing_statements)
+                    if not is_exist:
+                        saved_count += 1
+                        write_fd.write(command)
+                        write_fd.write('\n')
+                        write_fd.flush()
+                        with open(self.banned_explained_file, 'a', encoding='utf-8') as write_fd_banned_explained:
+                            explanation = {'banned_until': datetime.datetime.now() + self.ban_timer,
+                                           'command': command,
+                                           'requests': impact.requests}
+                            json.dump(explanation, write_fd_banned_explained)
 
-                    write_fd_banned_explained.write(command + ' --> \n')
-                    write_fd_banned_explained.write('\n'.join(impact.requests))
-                    write_fd_banned_explained.write('\n')
-                    write_fd_banned_explained.flush()
-                else:
-                    self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
-            write_fd.close()
-            write_fd_banned_explained.close()
-            read_fd.close()
+                    else:
+                        self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
             if saved_count > 0 and not self.should_push_banned_list:
                 self.log(
                     f'{saved_count} new blocking rule(s) has been added. Use --push '
@@ -544,8 +542,6 @@ class WebMonitor:
 
     def collect_geolookup(self):
         def geo_lookup(ip):
-            import requests
-            import xml.etree.ElementTree as ET
             url = f'http://api.geoiplookup.net/?query={ip}'
 
             response = requests.get(url)
@@ -584,7 +580,6 @@ class WebMonitor:
     """
 
     def push(self):
-        import re
         def execute_ban_on_minion(address):
             if address and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", address):
                 print('Pushing new rule: ' + address, end='')
@@ -652,14 +647,12 @@ def __main__():
                 while True:
                     for web_monitor in monitors:
                         web_monitor.work()
-                    import time
                     sleep_timer = options.sleep_timer
                     if not sleep_timer:
                         sleep_timer = 60
-                    from datetime import datetime, timedelta
                     print(
-                        f'[master]:[{datetime.now()}] - Sleeping for the ' + str(
-                            timedelta(seconds=sleep_timer)) + ' sec(s)')
+                        f'[master]:[{datetime.datetime.now()}] - Sleeping for the ' + str(
+                            datetime.timedelta(seconds=sleep_timer)) + ' sec(s)')
                     time.sleep(sleep_timer)
 
             else:
