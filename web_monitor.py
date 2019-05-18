@@ -200,11 +200,11 @@ class Impact:
 
 
 class ThreatLevel(Enum):
-    CRITICAL = 0
-    RED = 1
+    CRITICAL = 4
+    RED = 3
     YELLOW = 2
-    GREEN = 3
-    UNKNOWN = 4
+    GREEN = 1
+    UNKNOWN = 0
 
 
 """
@@ -249,6 +249,7 @@ class WebMonitor:
         @:param be_verbose - increase verbosity, print detailed information about the most aggressive impacts
         @:param geolookup - collect geo location info about current threats.
     """
+    DATE_TIME_PATTERN = '%H:%M:%S %d/%m/%Y'
 
     def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
                  banned_file=None, ban_timer=timedelta(hours=1), push_banned_list=False, be_verbose=False,
@@ -341,7 +342,7 @@ class WebMonitor:
     """
 
     def log(self, msg):
-        print(f'[{self.minion_id}]:[{datetime.now()}] - {msg}')
+        print(f'[{self.minion_id}]:[{datetime.now().strftime(self.DATE_TIME_PATTERN)}] - {msg}')
 
     """
         Run web-monitor in daemon mode. 
@@ -460,7 +461,7 @@ class WebMonitor:
                 return
             if r and len(r) > 3:
                 events = r[3:-1]
-                log_parser = AccessLogParser([''], events, self.download_data_since)
+                log_parser = AccessLogParser(self.suspicious_chunks, events, self.download_data_since)
                 parsed_logs = log_parser.parse_logs()
                 self.parse_events(parsed_logs)
             self.identify_threat_level()
