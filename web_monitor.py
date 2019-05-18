@@ -161,7 +161,7 @@ class Impact:
             print_requests(self)
 
     """
-        Convert events into the impacts. Define dangerous impacts. Link given events to the created impacts.
+        Convert events into the impacts. Link given events to the created impacts.
     """
 
     @staticmethod
@@ -174,8 +174,7 @@ class Impact:
                 addresses[eve.source] = 1
         impacts = []
         for source, hits in addresses.items():
-            is_dangerous = hits > 100
-            impact = Impact(source, hits, is_dangerous)
+            impact = Impact(source, hits)
             impacts.append(impact)
         for i in impacts:
             for eve in events:
@@ -186,9 +185,11 @@ class Impact:
     """
         Check if this impact was already analyzed before.
     """
+
     @staticmethod
-    def check_if_already_known(impacts_list, impact):
+    def is_already_known(impacts_list, impact):
         return any(impact.source_address == i.source_address for i in impacts_list)
+
 
 """
     Host threat level.
@@ -384,31 +385,14 @@ class WebMonitor:
                     self.suspicious_events.append(eve)
 
     """
-        Identify current minion status. 
-        Monitor will increase the threat level if he will receive a lot of events from the minion
-        CRITICAL level for less then 1h would means that your server is under the siege
-    """
-
-    def identify_threat_level(self):
-        if self.suspicious_events:
-            number_of_events = len(self.suspicious_events)
-
-            if number_of_events < 100:
-                self.threat_level = ThreatLevel.GREEN
-            elif 100 < number_of_events < 500:
-                self.threat_level = ThreatLevel.YELLOW
-            elif 500 < number_of_events < 1000:
-                self.threat_level = ThreatLevel.RED
-            elif number_of_events > 1000:
-                self.threat_level = ThreatLevel.CRITICAL
-
-    """
         Run the full lifecycle. Each step of this cycle is described bellow.
     """
 
     def work(self):
         self.ping()
         self.status()
+        self.identify_threat_level()
+
         if self.threat_level != ThreatLevel.UNKNOWN:
             self.analyze_threats()
             self.analyze_all_events()
@@ -449,39 +433,70 @@ class WebMonitor:
                     return
                 self.events.clear()
                 self.suspicious_events.clear()
-                if self.download_data_since and len(self.download_data_since) < 12:
-                    command = f'cat {self.remote_logs_file}'
-                    minion_response = self.exec_on_minion(command, bash_syntax=True)
-                    if minion_response:
-                        return list(minion_response)
+
+                command = f'cat {self.remote_logs_file}'
+                minion_response = self.exec_on_minion(command, bash_syntax=True)
+                if minion_response:
+                    return list(minion_response)
 
             try:
                 r = get_last_events()
-            except:
+            except Exception as e:
+                self.log(str(e))
                 return
             if r and len(r) > 3:
                 events = r[3:-1]
                 log_parser = AccessLogParser(self.suspicious_chunks, events, self.download_data_since)
                 parsed_logs = log_parser.parse_logs()
                 self.parse_events(parsed_logs)
-            self.identify_threat_level()
 
     """
-        Analyze received input. Define the impacts. Aggregate the most active addresses.
+        Identify current minion status. 
+        Monitor will increase the threat level if he will receive a lot of events from the minion
+        CRITICAL level for less then 1h would means that your server is under the siege
+    """
+
+    def identify_threat_level(self):
+        if self.suspicious_events:
+            number_of_events = len(self.suspicious_events)
+
+            if number_of_events < 100:
+                self.threat_level = ThreatLevel.GREEN
+            elif 100 < number_of_events < 500:
+                self.threat_level = ThreatLevel.YELLOW
+            elif 500 < number_of_events < 1000:
+                self.threat_level = ThreatLevel.RED
+            elif number_of_events > 1000:
+                self.threat_level = ThreatLevel.CRITICAL
+
+    """
+        Analyze received input. Define the impacts. Define dangerous impacts.
     """
 
     def analyze_threats(self):
-        if not self.suspicious_events or len(self.suspicious_events) == 0:
+        if len(self.suspicious_events) == 0:
             return
         self.impacts.clear()
         self.dangerous_impacts.clear()
 
         self.impacts = Impact.calculate_impact_statistic(events=self.suspicious_events)
         for i in self.impacts:
-            if i.is_dangerous:
+            if i.hits > 100:
                 self.dangerous_impacts.append(i)
         if self.geolookup:
             self.collect_geolookup()
+
+    """
+        Aggregate the most active addresses.
+    """
+
+    def analyze_all_events(self):
+        impacts = Impact.calculate_impact_statistic(events=self.events)
+        for i in impacts:
+            if i.hits > 10000:
+                i.is_dangerous = True
+                if not Impact.is_already_known(impacts, i):
+                    self.dangerous_impacts.append(i)
 
     """
         Parse created impacts, make a list with ban statements and store them into file.
@@ -506,19 +521,18 @@ class WebMonitor:
                         write_fd.flush()
                         with open(self.banned_explained_file, 'a', encoding='utf-8') as write_fd_banned_explained:
                             explanation = \
-                                {'banned_until': (datetime.now() + self.ban_timer).strftime('%H:%M:%S %d/%m/%Y'),
+                                {'source_address': impact.source_address,
+                                 'banned_until': (datetime.now() + self.ban_timer).strftime('%H:%M:%S %d/%m/%Y'),
                                  'command': command,
                                  'requests': impact.requests}
-                            json.dump(explanation, write_fd_banned_explained)
-                            write_fd_banned_explained.flush()
-                            write_fd_banned_explained.close()
+                            json.dump(explanation, write_fd_banned_explained, indent=2)
 
                     else:
                         self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
             if saved_count > 0 and not self.should_push_banned_list:
                 self.log(
                     f'{saved_count} new blocking rule(s) has been added. Use --push '
-                    f'to send them to the impacted server.')
+                    f'to send them to the impacted server(s).')
 
     """
         Print a report about minion status, his statistic and addresses pushed to be banned.
@@ -614,15 +628,8 @@ class WebMonitor:
                 continue
             else:
                 execute_ban_on_minion(address=f'{impact.source_address}')
+                impact.is_pushed = True
                 self.pushed_impacts.append(impact)
-
-    def analyze_all_events(self):
-        impacts = Impact.calculate_impact_statistic(events=self.events)
-        for i in impacts:
-            if i.hits > 10000:
-                i.is_dangerous = True
-                if not Impact.check_if_already_known(impacts, i):
-                    self.dangerous_impacts.append(i)
 
 
 def __main__():
@@ -642,10 +649,13 @@ def __main__():
                 suspicious_chunks.append(line.replace('\n', ''))
         with open(options.minions, 'r', encoding='utf-8') as minions_file:
             for line in minions_file:
+                if line.startswith("#"):
+                    continue
                 minions.append(line.replace('\n', ''))
         if len(minions) == 0:
             raise Exception(
-                "Minion(s) list is empty. Please, specify a new-line separated file with minion(s) and their log path")
+                "Minion(s) list is empty. Please, specify a new-line separated file with minion(s) and their log path, "
+                "e.g. - ubuntu:/var/log/nginx/access.log.\nThe '#' character will comment out your minion.")
         if len(minions) > 1:
             if options.daemon:
                 monitors = []
