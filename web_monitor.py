@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-from enum import Enum
-import datetime
-import time
-import configparser
 import argparse
-import re
-import xml.etree.ElementTree as ET
-import subprocess
+import configparser
 import json
+import re
+import subprocess
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+from enum import Enum
 
 import requests
 
 
 def get_arguments():
-
     parser = argparse.ArgumentParser()
     parser.add_argument('-c', '--config', dest='config',
                         help='Use the specified config file with properties.')
@@ -83,7 +82,8 @@ class AccessLogParser:
         self.last_time = self.parse_last_time(duration_time)
         self.logs = logs
 
-    def parse_last_time(self, last):
+    @staticmethod
+    def parse_last_time(last):
         try:
             timedelta_string = last
             td = {}
@@ -96,9 +96,9 @@ class AccessLogParser:
         except Exception as e:
             print('ERROR PARSING LOGS: ' + str(e))
 
-        parsing_start_time = datetime.datetime.now() - datetime.timedelta(days=td.pop('days', 0),
-                                                                          hours=td.pop('hours', 0),
-                                                                          minutes=td.pop('minutes', 0))
+        parsing_start_time = datetime.now() - timedelta(days=td.pop('days', 0),
+                                                        hours=td.pop('hours', 0),
+                                                        minutes=td.pop('minutes', 0))
         return parsing_start_time
 
     def parse_logs(self):
@@ -106,7 +106,7 @@ class AccessLogParser:
         for line in self.logs:
             try:
                 log_entry = re.search(self.log_pattern_rgx, line)
-                log_timestamp = datetime.datetime.strptime(log_entry['date'], "%d/%b/%Y:%H:%M:%S")
+                log_timestamp = datetime.strptime(log_entry['date'], "%d/%b/%Y:%H:%M:%S")
 
                 if log_timestamp > self.last_time:
                     log = {'source': log_entry['source'],
@@ -120,7 +120,6 @@ class AccessLogParser:
             except Exception as e:
                 print('ERROR PARSING LOG LINE: ' + str(e))
 
-        # print(f"Parsed {len(parsed_logs)} log entries.")
         return parsed_logs
 
 
@@ -184,6 +183,12 @@ class Impact:
                     i.requests.append(eve.request)
         return impacts
 
+    """
+        Check if this impact was already analyzed before.
+    """
+    @staticmethod
+    def check_if_already_known(impacts_list, impact):
+        return any(impact.source_address == i.source_address for i in impacts_list)
 
 """
     Host threat level.
@@ -246,7 +251,8 @@ class WebMonitor:
     """
 
     def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
-                 banned_file=None, ban_timer=datetime.timedelta(hours=1), push_banned_list=False, be_verbose=False, geolookup=False, suspicious_chunks=None):
+                 banned_file=None, ban_timer=timedelta(hours=1), push_banned_list=False, be_verbose=False,
+                 geolookup=False, suspicious_chunks=None):
         if not minion and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
         if ":/" not in minion:
@@ -335,7 +341,7 @@ class WebMonitor:
     """
 
     def log(self, msg):
-        print(f'[{self.minion_id}]:[{datetime.datetime.now()}] - {msg}')
+        print(f'[{self.minion_id}]:[{datetime.now()}] - {msg}')
 
     """
         Run web-monitor in daemon mode. 
@@ -345,7 +351,7 @@ class WebMonitor:
     def daemon(self):
         while True:
             self.work()
-            self.log(f'Sleeping for the {str(datetime.timedelta(seconds=self.sleep_timer))} sec(s)')
+            self.log(f'Sleeping for the {str(timedelta(seconds=self.sleep_timer))} sec(s)')
             time.sleep(int(self.sleep_timer))
 
     """
@@ -435,9 +441,10 @@ class WebMonitor:
     def status(self):
         if self.is_alive:
             def get_last_events():
-                if not self.remote_logs_file.startswith('/var/log'):
-                    self.log('REMOTE LOG PATH CONTAINS INCORRECT VALUES: ' + str(
-                        self.remote_logs_file) + '. Please provide the file path starting with /var/log')
+                if not self.remote_logs_file.startswith('/var/log') or not self.remote_logs_file.endswith('access.log'):
+                    self.log(
+                        f'REMOTE LOG PATH CONTAINS INCORRECT VALUES: {self.remote_logs_file}\n'
+                        f'Please provide the file path starting with /var/log and ending with access.log')
                     return
                 self.events.clear()
                 self.suspicious_events.clear()
@@ -481,8 +488,11 @@ class WebMonitor:
 
     def create_ban_statements(self):
         if len(self.dangerous_impacts) > 0:
-            with open(self.banned_file, 'r', encoding='utf-8') as read_fd:
-                existing_statements = read_fd.readlines()
+            try:
+                with open(self.banned_file, 'r', encoding='utf-8') as read_fd:
+                    existing_statements = read_fd.readlines()
+            except FileNotFoundError:
+                existing_statements = []
             with open(self.banned_file, 'a', encoding='utf-8') as write_fd:
                 saved_count = 0
                 for impact in self.dangerous_impacts:
@@ -494,10 +504,13 @@ class WebMonitor:
                         write_fd.write('\n')
                         write_fd.flush()
                         with open(self.banned_explained_file, 'a', encoding='utf-8') as write_fd_banned_explained:
-                            explanation = {'banned_until': datetime.datetime.now() + self.ban_timer,
-                                           'command': command,
-                                           'requests': impact.requests}
+                            explanation = \
+                                {'banned_until': (datetime.now() + self.ban_timer).strftime('%H:%M:%S %d/%m/%Y'),
+                                 'command': command,
+                                 'requests': impact.requests}
                             json.dump(explanation, write_fd_banned_explained)
+                            write_fd_banned_explained.flush()
+                            write_fd_banned_explained.close()
 
                     else:
                         self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
@@ -607,7 +620,8 @@ class WebMonitor:
         for i in impacts:
             if i.hits > 10000:
                 i.is_dangerous = True
-                self.dangerous_impacts.append(i)
+                if not Impact.check_if_already_known(impacts, i):
+                    self.dangerous_impacts.append(i)
 
 
 def __main__():
@@ -630,7 +644,7 @@ def __main__():
                 minions.append(line.replace('\n', ''))
         if len(minions) == 0:
             raise Exception(
-                "Minion(s) list is empty. Please, specifiy a new-line separated file with minion(s) and their log path")
+                "Minion(s) list is empty. Please, specify a new-line separated file with minion(s) and their log path")
         if len(minions) > 1:
             if options.daemon:
                 monitors = []
@@ -651,8 +665,8 @@ def __main__():
                     if not sleep_timer:
                         sleep_timer = 60
                     print(
-                        f'[master]:[{datetime.datetime.now()}] - Sleeping for the ' + str(
-                            datetime.timedelta(seconds=sleep_timer)) + ' sec(s)')
+                        f'[master]:[{datetime.now()}] - Sleeping for the ' + str(
+                            timedelta(seconds=sleep_timer)) + ' sec(s)')
                     time.sleep(sleep_timer)
 
             else:
