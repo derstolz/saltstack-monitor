@@ -250,7 +250,6 @@ class WebMonitor:
         @:param be_verbose - increase verbosity, print detailed information about the most aggressive impacts
         @:param geolookup - collect geo location info about current threats.
     """
-    DATE_TIME_PATTERN = '%H:%M:%S %d/%m/%Y'
 
     def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
                  banned_file=None, ban_timer=timedelta(hours=1), push_banned_list=False, be_verbose=False,
@@ -264,7 +263,6 @@ class WebMonitor:
                 'You have to provide a new-line separated list to check and compare the incoming logs with.')
 
         self.events = []
-        self.suspicious_events = []
         if config_file:
             config = configparser.ConfigParser()
             config.read(config_file)
@@ -301,6 +299,7 @@ class WebMonitor:
 
         self.is_alive = False
         self.threat_level = ThreatLevel.UNKNOWN
+        self.number_of_suspicious_events = 0
         self.impacts = []
         self.dangerous_impacts = []
         self.pushed_impacts = []
@@ -316,6 +315,11 @@ class WebMonitor:
         @:param salt_syntax - define that provided command is a salt statement e.g.: salt prod1 cmd.run 'uname -a'
                               and should be forwarded to the minion.
     """
+    DATE_TIME_PATTERN = '%H:%M:%S %d/%m/%Y'
+
+    @staticmethod
+    def current_date_time():
+        return datetime.now().strftime(WebMonitor.DATE_TIME_PATTERN)
 
     def exec_on_minion(self, command, bash_syntax=False, salt_syntax=False):
         if not bash_syntax and not salt_syntax:
@@ -381,8 +385,6 @@ class WebMonitor:
             eve = str_to_event_object(e)
             if eve:
                 self.events.append(eve)
-                if eve.is_suspicious:
-                    self.suspicious_events.append(eve)
 
     """
         Run the full lifecycle. Each step of this cycle is described bellow.
@@ -395,7 +397,6 @@ class WebMonitor:
 
         if self.threat_level != ThreatLevel.UNKNOWN:
             self.analyze_threats()
-            self.analyze_all_events()
             self.create_ban_statements()
         if self.should_push_banned_list:
             self.push()
@@ -432,7 +433,6 @@ class WebMonitor:
                         f'Please provide the file path starting with /var/log and ending with access.log')
                     return
                 self.events.clear()
-                self.suspicious_events.clear()
 
                 command = f'cat {self.remote_logs_file}'
                 minion_response = self.exec_on_minion(command, bash_syntax=True)
@@ -457,16 +457,16 @@ class WebMonitor:
     """
 
     def identify_threat_level(self):
-        if self.suspicious_events:
-            number_of_events = len(self.suspicious_events)
+        self.number_of_suspicious_events = len([eve for eve in self.events if eve.is_suspicious])
+        if self.number_of_suspicious_events > 0:
 
-            if number_of_events < 100:
+            if self.number_of_suspicious_events < 100:
                 self.threat_level = ThreatLevel.GREEN
-            elif 100 < number_of_events < 500:
+            elif 100 < self.number_of_suspicious_events < 500:
                 self.threat_level = ThreatLevel.YELLOW
-            elif 500 < number_of_events < 1000:
+            elif 500 < self.number_of_suspicious_events < 1000:
                 self.threat_level = ThreatLevel.RED
-            elif number_of_events > 1000:
+            elif self.number_of_suspicious_events > 1000:
                 self.threat_level = ThreatLevel.CRITICAL
 
     """
@@ -474,29 +474,17 @@ class WebMonitor:
     """
 
     def analyze_threats(self):
-        if len(self.suspicious_events) == 0:
+        if self.number_of_suspicious_events == 0:
             return
         self.impacts.clear()
         self.dangerous_impacts.clear()
 
-        self.impacts = Impact.calculate_impact_statistic(events=self.suspicious_events)
+        self.impacts = Impact.calculate_impact_statistic(events=self.events)
         for i in self.impacts:
             if i.hits > 100:
                 self.dangerous_impacts.append(i)
         if self.geolookup:
             self.collect_geolookup()
-
-    """
-        Aggregate the most active addresses.
-    """
-
-    def analyze_all_events(self):
-        impacts = Impact.calculate_impact_statistic(events=self.events)
-        for i in impacts:
-            if i.hits > 10000:
-                i.is_dangerous = True
-                if not Impact.is_already_known(impacts, i):
-                    self.dangerous_impacts.append(i)
 
     """
         Parse created impacts, make a list with ban statements and store them into file.
@@ -521,8 +509,9 @@ class WebMonitor:
                         write_fd.flush()
                         with open(self.banned_explained_file, 'a', encoding='utf-8') as write_fd_banned_explained:
                             explanation = \
-                                {'source_address': impact.source_address,
-                                 'banned_until': (datetime.now() + self.ban_timer).strftime('%H:%M:%S %d/%m/%Y'),
+                                {'timestamp': self.current_date_time(),
+                                 'banned_until': (datetime.now() + self.ban_timer).strftime(self.DATE_TIME_PATTERN),
+                                 'source_address': impact.source_address,
                                  'command': command,
                                  'requests': impact.requests}
                             json.dump(explanation, write_fd_banned_explained, indent=2)
@@ -531,8 +520,8 @@ class WebMonitor:
                         self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
             if saved_count > 0 and not self.should_push_banned_list:
                 self.log(
-                    f'{saved_count} new blocking rule(s) has been added. Use --push '
-                    f'to send them to the impacted server(s).')
+                    f'{saved_count} new blocking rule(s) have been added. Use --push '
+                    f'to send them to the impacted server(s). See {self.banned_explained_file} file for more details.')
 
     """
         Print a report about minion status, his statistic and addresses pushed to be banned.
@@ -544,14 +533,15 @@ class WebMonitor:
         else:
             is_alive_message = 'Host is down'
 
-        report_message = f'\n\tStatus: {is_alive_message}' \
-            f'\n\tThreat level: {self.threat_level.name}'
-        if self.threat_level != ThreatLevel.UNKNOWN and len(self.suspicious_events) > 0:
-            report_message += \
+        report_message = \
+            f'\n\tStatus: {is_alive_message}' \
+                f'\n\tThreat level: {self.threat_level.name}' \
                 f'\n\tTotal requests received for last {self.download_data_since}: ' \
-                    f'{len(self.events)}' \
-                    f'\n\tSuspicious requests received for last {self.download_data_since}: ' \
-                    f'{len(self.suspicious_events)}' \
+                f'{len(self.events)}'
+        if self.threat_level != ThreatLevel.UNKNOWN and self.number_of_suspicious_events > 0:
+            report_message += \
+                f'\n\tSuspicious requests received for last {self.download_data_since}: ' \
+                    f'{self.number_of_suspicious_events}' \
                     f'\n\n\tNon-aggressive IP addresses: {len(self.impacts) - len(self.dangerous_impacts)}' \
                     f'\n\tAggressive IP addresses: {len(self.dangerous_impacts)} ' \
                     f'({sum(di.hits for di in self.dangerous_impacts)} hits)' \
