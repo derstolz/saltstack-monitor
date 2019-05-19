@@ -140,11 +140,19 @@ class Impact:
 
     def __init__(self, source, hits, is_dangerous=False, is_pushed=False):
         self.source_address = source
+        self.events = []
         self.hits = hits
+        self.suspicious_hits = 0
         self.is_dangerous = is_dangerous
         self.is_pushed = is_pushed
-        self.requests = []
-        self.geo_location = None
+
+    """
+        Extract all HTTP requests from the incoming events as a list of strings.
+    """
+
+    def extract_requests(self):
+        return [eve.request for eve in self.events]
+
 
     """
         Print explaining information about this impact (source address, requests and hits).
@@ -152,11 +160,12 @@ class Impact:
 
     def explain(self):
         def print_requests(impact):
-            for req in impact.requests:
+            for req in impact.extract_requests():
                 print(f'\n\t{req}; ', end='')
             print()
 
-        if self.requests and len(self.requests) > 0:
+        req = self.extract_requests()
+        if req and len(req) > 0:
             print(f'\n\n{self.source_address} --> ')
             print_requests(self)
 
@@ -174,12 +183,14 @@ class Impact:
                 addresses[eve.source] = 1
         impacts = []
         for source, hits in addresses.items():
+            suspicious_hits = len([eve for eve in events if eve.source == source and eve.is_suspicious])
             impact = Impact(source, hits)
+            impact.suspicious_hits = suspicious_hits
             impacts.append(impact)
         for i in impacts:
             for eve in events:
                 if eve.source == i.source_address:
-                    i.requests.append(eve.request)
+                    i.events.append(eve)
         return impacts
 
     """
@@ -485,7 +496,7 @@ class WebMonitor:
 
         self.impacts = Impact.calculate_impact_statistic(events=self.events)
         for i in self.impacts:
-            if i.hits > 100:
+            if i.suspicious_hits > 100:
                 self.dangerous_impacts.append(i)
         if self.geolookup:
             self.collect_geolookup()
@@ -517,18 +528,19 @@ class WebMonitor:
                                  'banned_until': self.get_next_unban_date_time(self.ban_timer),
                                  'source_address': impact.source_address,
                                  'command': command,
-                                 'requests': impact.requests}
+                                 'requests': impact.extract_requests()}
                             json.dump(explanation, write_fd_banned_explained, indent=2)
 
                     else:
                         self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
             if saved_count > 0 and not self.should_push_banned_list:
                 self.log(
-                    f'{saved_count} new blocking rule(s) have been added. Use --push '
-                    f'to send them to the impacted server(s). See {self.banned_explained_file} file for more details.')
+                    f'{saved_count} new blocking rule(s) have been added, use --push argument '
+                    f'to send them to the impacted server(s). '
+                    f'See {self.banned_explained_file} file for the impact statistics.')
 
     """
-        Print a report about minion status, his statistic and addresses pushed to be banned.
+        Print a report about minion(s) status, his(their) statistic and addresses pushed to be banned.
     """
 
     def report(self):
