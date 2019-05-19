@@ -36,11 +36,10 @@ def get_arguments():
                              'Web Monitor can periodically interact with your minions, '
                              'receive data from them and then print their current status. '
                              'Without this options, Web Monitor will do its lifecycle for one time and exit.')
-    parser.add_argument('-b', '--banned', dest='banned',
-                        help='Optional. A file contains iptables block statement(s). '
-                             'This file should exist and be writable for the script. '
-                             'If not provided, then file would be created in the same directory '
-                             'and all statements will be written to it.')
+    parser.add_argument('-b', '--ban-timer', dest='ban_timer',
+                        help='Optional. Provide a time period on which the threats should be banned. '
+                             'Default is 1 hour. '
+                             'It should be a string in the following format: "1hr", "10min", "5d"')
     parser.add_argument('-p', '--push', action='store_true',
                         help='Optional. Push generated block statements to the minion(s). '
                              'They should be applied as soon as they arrived. Default is false.')
@@ -200,6 +199,10 @@ class Impact:
     def is_already_known(impacts_list, impact):
         return any(impact.source_address == i.source_address for i in impacts_list)
 
+    @staticmethod
+    def is_already_banned(banned_impacts_list, impact):
+        return any(impact.source_address == i.source_address for i in banned_impacts_list)
+
 
 """
     Host threat level.
@@ -252,7 +255,6 @@ class WebMonitor:
 
         @:param default_sleep_timer - how long monitor should wait before he should recheck the minions status
         @:param download_data_since - last period of time to pull information about. eg: 10d / 100d / 60m
-        @:param banned_file - a file name to store created ban statements
         @:param push_banned_list - a boolean indicates that WebMonitor should push created ban statements to the minion.
         Default is false.
         Without this options, WebMonitor will simply analyze events and warn you about the most aggressive attempts.
@@ -262,7 +264,7 @@ class WebMonitor:
     """
 
     def __init__(self, minion=None, config_file=None, default_sleep_timer=None, download_data_since=None,
-                 banned_file=None, ban_timer=timedelta(hours=1), push_banned_list=False, be_verbose=False,
+                 ban_timer=None, push_banned_list=False, be_verbose=False,
                  geolookup=False, suspicious_chunks=None):
         if not minion and not config_file:
             raise Exception("Nothing to do, please provide a minion id or a config file with minions")
@@ -281,10 +283,11 @@ class WebMonitor:
             self.remote_logs_file = config['Hosts']['Minions'].split(':')[1]
             self.sleep_timer = int(config['Monitor']['PollingIntervalInSeconds'])
             self.download_data_since = config['Monitor']['DownloadDataForLast']
-            self.banned_file = config['Monitor']['BannedFile']
+            self.impact_stats_file = config['Monitor']['BannedFile']
             self.should_push_banned_list = config['Monitor']['ShouldPushBannedList']
             self.verbose = config['Monitor']['Verbosity']
             self.suspicious_chunks = config['Monitor']['SuspiciousChunksFile']
+            self.ban_timer = config['Monitor']['BanTimer']
         else:
             minion_name = minion.split(':')[0]
             remote_log_path = minion.split(':')[1]
@@ -297,11 +300,11 @@ class WebMonitor:
                 self.download_data_since = '1d'
             else:
                 self.download_data_since = download_data_since
-            if banned_file:
-                self.banned_file = banned_file
+            self.impact_stats_file = self.minion_id + '_' + 'stats.json'
+            if ban_timer:
+                self.ban_timer = self.parse_ban_time(ban_timer)
             else:
-                self.banned_file = self.minion_id + '_' + 'banned.txt'
-            self.ban_timer = ban_timer
+                self.ban_timer = timedelta(hours=1)
             self.verbose = be_verbose
             self.remote_logs_file = remote_log_path
             self.geolookup = geolookup
@@ -313,18 +316,9 @@ class WebMonitor:
         self.impacts = []
         self.dangerous_impacts = []
         self.pushed_impacts = []
-        self.banned_explained_file = self.minion_id + '_' + 'banned_explained.json'
+        self.ban_history = self.minion_id + '_' + 'ban_history.json'
         self.should_push_banned_list = push_banned_list
 
-    """
-        Execute a command on the remote minion.
-        Command will be executed on the minion with id stored in the self.minion_id
-        
-        @:param bash_syntax - define that provided command is a pure bash command e.g.: pwd && ls -l 
-                              that should be forwarded to the minion 'as is'
-        @:param salt_syntax - define that provided command is a salt statement e.g.: salt prod1 cmd.run 'uname -a'
-                              and should be forwarded to the minion.
-    """
     DATE_TIME_PATTERN = '%H:%M:%S %d/%m/%Y'
 
     @staticmethod
@@ -334,6 +328,38 @@ class WebMonitor:
     @staticmethod
     def get_next_unban_date_time(ban_timer):
         return (datetime.now() + ban_timer).strftime(WebMonitor.DATE_TIME_PATTERN)
+
+    @staticmethod
+    def parse_ban_time(time_str):
+        regex = re.compile(r'((?P<days>\d+?)d)?((?P<hours>\d+?)hr)?((?P<minutes>\d+?)min)?')
+        parts = regex.match(time_str)
+        if not parts:
+            return
+        parts = parts.groupdict()
+        time_params = {}
+        for name, param in parts.items():
+            if param:
+                time_params[name] = int(param)
+        return timedelta(**time_params)
+
+    @staticmethod
+    def get_ban_expiration_time(ban_timer):
+        if 'hr' in ban_timer:
+            return ban_timer.replace('hr', ' hours')
+        if 'min' in ban_timer:
+            return ban_timer.replace('min', ' minutes')
+        if 'd' in ban_timer:
+            return ban_timer.replace('d', ' days')
+
+    """
+        Execute a command on the remote minion.
+        Command will be executed on the minion with id stored in the self.minion_id
+
+        @:param bash_syntax - define that provided command is a pure bash command e.g.: pwd && ls -l 
+                              that should be forwarded to the minion 'as is'
+        @:param salt_syntax - define that provided command is a salt statement e.g.: salt prod1 cmd.run 'uname -a'
+                              and should be forwarded to the minion.
+    """
 
     def exec_on_minion(self, command, bash_syntax=False, salt_syntax=False):
         if not bash_syntax and not salt_syntax:
@@ -375,32 +401,6 @@ class WebMonitor:
             time.sleep(int(self.sleep_timer))
 
     """
-        Convert incoming events from the minion into the Event object and store them in web-monitor memory.
-    """
-
-    def parse_events(self, events):
-        def str_to_event_object(e):
-            dict = e
-            if len(dict.keys()) > 0:
-                self.threat_level = ThreatLevel.GREEN
-            if dict:
-                event = Event(
-                    dict['source'],
-                    dict['date'],
-                    dict['request'],
-                    dict['response'],
-                    dict['referer'],
-                    dict['useragent'],
-                    dict['is_suspicious'],
-                    e)
-                return event
-
-        for e in events:
-            eve = str_to_event_object(e)
-            if eve:
-                self.events.append(eve)
-
-    """
         Run the full lifecycle. Each step of this cycle is described bellow.
     """
 
@@ -411,7 +411,7 @@ class WebMonitor:
 
         if self.threat_level != ThreatLevel.UNKNOWN:
             self.analyze_threats()
-            self.create_ban_statements()
+            self.save_impact_stats()
         if self.should_push_banned_list:
             self.push()
         self.report()
@@ -465,6 +465,32 @@ class WebMonitor:
                 self.parse_events(parsed_logs)
 
     """
+        Convert incoming events from the minion into the Event object and store them in web-monitor memory.
+    """
+
+    def parse_events(self, events):
+        def str_to_event_object(e):
+            dict = e
+            if len(dict.keys()) > 0:
+                self.threat_level = ThreatLevel.GREEN
+            if dict:
+                event = Event(
+                    dict['source'],
+                    dict['date'],
+                    dict['request'],
+                    dict['response'],
+                    dict['referer'],
+                    dict['useragent'],
+                    dict['is_suspicious'],
+                    e)
+                return event
+
+        for e in events:
+            eve = str_to_event_object(e)
+            if eve:
+                self.events.append(eve)
+
+    """
         Identify current minion status. 
         Monitor will increase the threat level if he will receive a lot of events from the minion
         CRITICAL level for less then 1h would means that your server is under the siege
@@ -501,47 +527,45 @@ class WebMonitor:
             self.collect_geolookup()
 
     """
-        Parse created impacts, make a list with ban statements and store them into file.
+        Read stats file about all saved dangerous impacts.
+    """
+    def read_stats_file(self):
+        existing_stats = []
+        try:
+            with open(self.impact_stats_file, 'r', encoding='utf-8') as read_fd:
+                for i in read_fd.readlines():
+                    if i and i != '':
+                        impact = json.loads(i)
+                        existing_stats.append(impact)
+            return existing_stats
+        except FileNotFoundError:
+            # do nothing
+            pass
+
+    """
+        Parse created impacts and store them into file.
     """
 
-    def create_ban_statements(self):
+    def save_impact_stats(self):
         if len(self.dangerous_impacts) > 0:
-            try:
-                with open(self.banned_file, 'r', encoding='utf-8') as read_fd:
-                    existing_statements = read_fd.readlines()
-            except FileNotFoundError:
-                existing_statements = []
-            with open(self.banned_file, 'a', encoding='utf-8') as write_fd:
-                saved_count = 0
-                for impact in self.dangerous_impacts:
-                    command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
+            existing_statements = self.read_stats_file()
+            saved_count = 0
+            for impact in self.dangerous_impacts:
+                is_exist = any(
+                    address['source_address'] == impact.source_address for address in existing_statements)
 
-                    # SET UP THE CORRECT BAN TIMER
-                    # command = f"iptables " \
-                    #     f"-I INPUT -s {impact.source_address} -j DROP && " \
-                    #     f"at now + {self.ban_timer} <<< 'iptables -D INPUT -s {impact.source_address} -j DROP'"
-                    is_exist = any(command == st.replace('\n', '') for st in existing_statements)
-                    if not is_exist:
-                        saved_count += 1
-                        write_fd.write(command)
-                        write_fd.write('\n')
-                        write_fd.flush()
-                        with open(self.banned_explained_file, 'a', encoding='utf-8') as write_fd_banned_explained:
-                            explanation = \
-                                {'timestamp': self.get_current_date_time(),
-                                 'banned_until': self.get_next_unban_date_time(self.ban_timer),
-                                 'source_address': impact.source_address,
-                                 'command': command,
-                                 'requests': impact.extract_requests()}
-                            json.dump(explanation, write_fd_banned_explained, indent=2)
+                if not is_exist:
+                    saved_count += 1
+                    self.log_impact_stats(self.impact_stats_file, impact)
+                else:
+                    if not impact.is_pushed:
+                        self.log(f'{impact.source_address} ({impact.hits} hit(s)) is pending to be banned.')
+                    self.log_impact_stats(self.impact_stats_file, impact)
 
-                    else:
-                        self.log(f'{impact.source_address} ({impact.hits} hit(s)) was already known before.')
             if saved_count > 0 and not self.should_push_banned_list:
                 self.log(
-                    f'{saved_count} new blocking rule(s) have been added, use --push argument '
-                    f'to send them to the impacted server(s). '
-                    f'See {self.banned_explained_file} file for the impact statistics.')
+                    f'{saved_count} new address(s) can be blocked, use --push argument '
+                    f'to send ban command(s). ')
 
     """
         Print a report about minion(s) status, his(their) statistic and addresses pushed to be banned.
@@ -612,44 +636,77 @@ class WebMonitor:
                     print('FAILED')
 
     """
+        Save a log about banned IP address.
+    """
+    def log_ban_event(self, file_name, impact):
+        with open(file_name, 'a', encoding='utf-8') as write_fd_banned_explained:
+            explanation = \
+                {'timestamp': self.get_current_date_time(),
+                 'banned_until': self.get_next_unban_date_time(self.ban_timer),
+                 'source_address': impact.source_address,
+                 'hits': impact.suspicious_hits,
+                 'suspicious_hits': impact.suspicious_hits,
+                 'requests': impact.extract_requests()}
+            json.dump(explanation, write_fd_banned_explained, indent=2)
+            write_fd_banned_explained.write('\n')
+
+    """
+        Save a log about dangerous impact which has a lot of hits.
+    """
+    def log_impact_stats(self, file_name, impact):
+        with open(file_name, 'a', encoding='utf-8') as write_fd:
+            stats = \
+                {
+                    'timestamp': self.get_current_date_time(),
+                    'source_address': impact.source_address,
+                    'hits': impact.hits,
+                    'suspicious_hits': impact.suspicious_hits
+                }
+            json.dump(stats, write_fd)
+            write_fd.write('\n')
+
+    """
         Push created ban statements to the minion.
-        This action (if succeed) will block the traffic between pushed address and the remote minion.
+        This action (if succeed) will block all traffic between pushed address and the remote minion.
         After statement was pushed, address will be stored in memory and will not be pushed anymore.
     """
 
     def push(self):
         def execute_ban_on_minion(address):
             if address and re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", address):
-                print('Pushing new rule: ' + address, end='')
-                command = \
-                    f'sudo /sbin/iptables ' \
-                        f'-A INPUT ' \
-                        f'--source {address} ' \
-                        f'-j DROP'
+                # command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
+
+                # SET UP THE CORRECT BAN TIMER
+                expiration_time = ''
+                command = f"iptables " \
+                    f"-I INPUT -s {impact.source_address} -j DROP && " \
+                    f"at now + {expiration_time} <<< 'iptables -D INPUT -s {impact.source_address} -j DROP'"
                 r = self.exec_on_minion(command, bash_syntax=True)
                 if r:
                     if type(r) == list and len(r) > 2 and not any('error' in m for m in r):
-                        print(' --> OK')
+                        return True
 
         for impact in self.dangerous_impacts:
             source = impact.source_address
             if any(source == i.source_address for i in self.pushed_impacts):
-                self.log(source + f' ({impact.hits} hit(s)) was already pushed before.')
+                self.log(source + f' ({impact.hits} hit(s)) was banned before.')
                 continue
             else:
-                execute_ban_on_minion(address=f'{impact.source_address}')
-                impact.is_pushed = True
-                self.pushed_impacts.append(impact)
+                is_banned = execute_ban_on_minion(address=f'{impact.source_address}')
+
+                if is_banned:
+                    impact.is_pushed = True
+                    self.log_ban_event(self.ban_history, impact)
+                    self.log(
+                        impact.source_address + f' was blocked. See {self.ban_history} file for the details.')
+                    self.pushed_impacts.append(impact)
 
 
 def __main__():
     options = get_arguments()
     if options.config:
-        web_monitor = WebMonitor(config_file=options.config,
-                                 default_sleep_timer=options.sleep_timer,
-                                 banned_file=options.banned,
-                                 be_verbose=options.verbose,
-                                 geolookup=options.geolookup)
+        # FIXME: TO BE IMPLEMENTED
+        web_monitor = WebMonitor(config_file=options.config)
         web_monitor.daemon()
     elif options.saltstack:
         minions = []
@@ -673,11 +730,11 @@ def __main__():
                     web_monitor = WebMonitor(m,
                                              default_sleep_timer=options.sleep_timer,
                                              download_data_since=options.last,
-                                             banned_file=options.banned,
                                              push_banned_list=options.push,
                                              be_verbose=options.verbose,
                                              geolookup=options.geolookup,
-                                             suspicious_chunks=suspicious_chunks)
+                                             suspicious_chunks=suspicious_chunks,
+                                             ban_timer=options.ban_timer)
                     monitors.append(web_monitor)
                 while True:
                     for web_monitor in monitors:
@@ -695,21 +752,21 @@ def __main__():
                     web_monitor = WebMonitor(m,
                                              default_sleep_timer=options.sleep_timer,
                                              download_data_since=options.last,
-                                             banned_file=options.banned,
                                              push_banned_list=options.push,
                                              be_verbose=options.verbose,
                                              geolookup=options.geolookup,
-                                             suspicious_chunks=suspicious_chunks)
+                                             suspicious_chunks=suspicious_chunks,
+                                             ban_timer=options.ban_timer)
                     web_monitor.work()
         else:
             web_monitor = WebMonitor(minions[0],
                                      default_sleep_timer=options.sleep_timer,
                                      download_data_since=options.last,
-                                     banned_file=options.banned,
                                      push_banned_list=options.push,
                                      be_verbose=options.verbose,
                                      geolookup=options.geolookup,
-                                     suspicious_chunks=suspicious_chunks)
+                                     suspicious_chunks=suspicious_chunks,
+                                     ban_timer=options.ban_timer)
             if options.daemon:
                 web_monitor.daemon()
             else:
