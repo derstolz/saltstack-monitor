@@ -153,7 +153,6 @@ class Impact:
     def extract_requests(self):
         return [eve.request for eve in self.events]
 
-
     """
         Print explaining information about this impact (source address, requests and hits).
     """
@@ -516,6 +515,11 @@ class WebMonitor:
                 saved_count = 0
                 for impact in self.dangerous_impacts:
                     command = f'/sbin/iptables -A INPUT -s {impact.source_address} -j DROP'
+
+                    # SET UP THE CORRECT BAN TIMER
+                    # command = f"iptables " \
+                    #     f"-I INPUT -s {impact.source_address} -j DROP && " \
+                    #     f"at now + {self.ban_timer} <<< 'iptables -D INPUT -s {impact.source_address} -j DROP'"
                     is_exist = any(command == st.replace('\n', '') for st in existing_statements)
                     if not is_exist:
                         saved_count += 1
