@@ -318,8 +318,12 @@ class WebMonitor:
     DATE_TIME_PATTERN = '%H:%M:%S %d/%m/%Y'
 
     @staticmethod
-    def current_date_time():
+    def get_current_date_time():
         return datetime.now().strftime(WebMonitor.DATE_TIME_PATTERN)
+
+    @staticmethod
+    def get_next_unban_date_time(ban_timer):
+        return (datetime.now() + ban_timer).strftime(WebMonitor.DATE_TIME_PATTERN)
 
     def exec_on_minion(self, command, bash_syntax=False, salt_syntax=False):
         if not bash_syntax and not salt_syntax:
@@ -509,8 +513,8 @@ class WebMonitor:
                         write_fd.flush()
                         with open(self.banned_explained_file, 'a', encoding='utf-8') as write_fd_banned_explained:
                             explanation = \
-                                {'timestamp': self.current_date_time(),
-                                 'banned_until': (datetime.now() + self.ban_timer).strftime(self.DATE_TIME_PATTERN),
+                                {'timestamp': self.get_current_date_time(),
+                                 'banned_until': self.get_next_unban_date_time(self.ban_timer),
                                  'source_address': impact.source_address,
                                  'command': command,
                                  'requests': impact.requests}
